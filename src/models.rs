@@ -133,6 +133,15 @@ pub struct AvatarDecoration {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UserInstance {
+    pub name: Option<String>,
+    pub favicon_url: Option<String>,
+    pub icon_url: Option<String>,
+    pub theme_color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NormalizedUser {
     pub id: String,
     pub username: String,
@@ -145,6 +154,8 @@ pub struct NormalizedUser {
     pub avatar_decorations: Vec<AvatarDecoration>,
     #[serde(default)]
     pub emojis: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<UserInstance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,6 +505,7 @@ pub struct RawUser {
     pub avatar_decorations: Vec<AvatarDecoration>,
     #[serde(default)]
     pub emojis: HashMap<String, String>,
+    pub instance: Option<UserInstance>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -700,6 +712,7 @@ impl From<RawUser> for NormalizedUser {
             is_bot: user.is_bot,
             avatar_decorations: user.avatar_decorations,
             emojis: user.emojis,
+            instance: user.instance,
         }
     }
 }
