@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -103,6 +103,15 @@ pub struct StreamNoteUpdatedEvent {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StreamNoteCaptureEvent {
+    pub account_id: String,
+    pub note_id: String,
+    pub update_type: String,
+    pub body: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamStatusEvent {
     pub account_id: String,
     pub state: String,
@@ -113,6 +122,8 @@ pub struct StreamStatusEvent {
 enum WsCommand {
     Subscribe { channel: String, id: String, params: Option<Value> },
     Unsubscribe { id: String },
+    SubNote { id: String },
+    UnsubNote { id: String },
     Shutdown,
 }
 
@@ -128,15 +139,19 @@ struct ConnectionHandle {
 struct SubscriptionInfo {
     account_id: String,
     host: String,
+    /// "timeline", "antenna", "channel", "main", or "chat"
     kind: String,
+    /// The Misskey channel name (e.g. "homeTimeline", "main")
     channel: String,
+    /// Original timeline type (e.g. "home", "local") for cache isolation
     timeline_type: String,
+    /// Extra params for channel subscription (e.g. listId for userListTimeline)
     params: Option<Value>,
 }
 
 pub struct StreamingManager {
     connections: Arc<Mutex<HashMap<String, ConnectionHandle>>>,
-    subscriptions: Arc<Mutex<HashMap<String, SubscriptionInfo>>>,
+    subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
     emitter: Arc<dyn FrontendEmitter>,
     event_bus: Arc<EventBus>,
     db: Arc<Database>,
@@ -150,7 +165,7 @@ impl StreamingManager {
     ) -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
-            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
             emitter,
             event_bus,
             db,
@@ -170,6 +185,7 @@ impl StreamingManager {
 
         let url = format!("wss://{host}/streaming?i={token}");
 
+        // Verify initial connection (with timeout to prevent hang DoS)
         let (ws_stream, _) = tokio::time::timeout(
             WS_CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async_with_config(&url, Some(ws_config()), false),
@@ -229,7 +245,8 @@ impl StreamingManager {
             }
         }
 
-        let mut subs = self.subscriptions.lock().await;
+        // Remove all subscriptions for this account
+        let mut subs = self.subscriptions.write().await;
         subs.retain(|_, info| info.account_id != account_id);
 
         emit_or_log!(self.emitter, "stream-status", StreamStatusEvent {
@@ -251,7 +268,7 @@ impl StreamingManager {
         let host = self.get_host(account_id).await?;
         self.send_subscribe(account_id, &channel, &sub_id, params.clone()).await?;
 
-        let mut subs = self.subscriptions.lock().await;
+        let mut subs = self.subscriptions.write().await;
         subs.insert(
             sub_id.clone(),
             SubscriptionInfo {
@@ -278,7 +295,7 @@ impl StreamingManager {
         let host = self.get_host(account_id).await?;
         self.send_subscribe(account_id, "antenna", &sub_id, params.clone()).await?;
 
-        let mut subs = self.subscriptions.lock().await;
+        let mut subs = self.subscriptions.write().await;
         subs.insert(
             sub_id.clone(),
             SubscriptionInfo {
@@ -305,7 +322,7 @@ impl StreamingManager {
         let host = self.get_host(account_id).await?;
         self.send_subscribe(account_id, "channel", &sub_id, params.clone()).await?;
 
-        let mut subs = self.subscriptions.lock().await;
+        let mut subs = self.subscriptions.write().await;
         subs.insert(
             sub_id.clone(),
             SubscriptionInfo {
@@ -332,7 +349,7 @@ impl StreamingManager {
         let host = self.get_host(account_id).await?;
         self.send_subscribe(account_id, "chatUser", &sub_id, params.clone()).await?;
 
-        let mut subs = self.subscriptions.lock().await;
+        let mut subs = self.subscriptions.write().await;
         subs.insert(
             sub_id.clone(),
             SubscriptionInfo {
@@ -359,7 +376,7 @@ impl StreamingManager {
         let host = self.get_host(account_id).await?;
         self.send_subscribe(account_id, "chatRoom", &sub_id, params.clone()).await?;
 
-        let mut subs = self.subscriptions.lock().await;
+        let mut subs = self.subscriptions.write().await;
         subs.insert(
             sub_id.clone(),
             SubscriptionInfo {
@@ -381,7 +398,7 @@ impl StreamingManager {
         let host = self.get_host(account_id).await?;
         self.send_subscribe(account_id, "main", &sub_id, None).await?;
 
-        let mut subs = self.subscriptions.lock().await;
+        let mut subs = self.subscriptions.write().await;
         subs.insert(
             sub_id.clone(),
             SubscriptionInfo {
@@ -412,10 +429,32 @@ impl StreamingManager {
 
         drop(conns);
 
-        let mut subs = self.subscriptions.lock().await;
+        let mut subs = self.subscriptions.write().await;
         subs.remove(subscription_id);
 
         Ok(())
+    }
+
+    pub async fn sub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
+        let conns = self.connections.lock().await;
+        let handle = conns
+            .get(account_id)
+            .ok_or_else(|| NoteDeckError::NoConnection(account_id.to_string()))?;
+        handle
+            .cmd_tx
+            .send(WsCommand::SubNote { id: note_id.to_string() })
+            .map_err(|_| NoteDeckError::ConnectionClosed)
+    }
+
+    pub async fn unsub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
+        let conns = self.connections.lock().await;
+        let handle = conns
+            .get(account_id)
+            .ok_or_else(|| NoteDeckError::NoConnection(account_id.to_string()))?;
+        handle
+            .cmd_tx
+            .send(WsCommand::UnsubNote { id: note_id.to_string() })
+            .map_err(|_| NoteDeckError::ConnectionClosed)
     }
 
     async fn get_host(&self, account_id: &str) -> Result<String, NoteDeckError> {
@@ -466,6 +505,7 @@ enum WsExitReason {
 
 const MAX_BACKOFF_SECS: u64 = 30;
 
+/// Top-level task that handles reconnection with exponential backoff.
 async fn connection_task(
     emitter: Arc<dyn FrontendEmitter>,
     event_bus: Arc<EventBus>,
@@ -474,21 +514,24 @@ async fn connection_task(
     url: String,
     initial_ws: WsStream,
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
-    subscriptions: Arc<Mutex<HashMap<String, SubscriptionInfo>>>,
+    subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
 ) {
     let mut backoff_secs: u64 = 1;
 
+    // Run the first session with the already-connected WebSocket
     let reason = run_ws_session(&emitter, &event_bus, &db, &account_id, initial_ws, &mut cmd_rx, &subscriptions).await;
     if matches!(reason, WsExitReason::Shutdown) {
         return;
     }
 
+    // Reconnection loop
     loop {
         emit_or_log!(emitter, "stream-status", StreamStatusEvent {
             account_id: account_id.clone(),
             state: "reconnecting".to_string(),
         });
 
+        // Wait with backoff, but listen for Shutdown during the wait
         let sleep = tokio::time::sleep(Duration::from_secs(backoff_secs));
         tokio::pin!(sleep);
 
@@ -498,6 +541,9 @@ async fn connection_task(
                 cmd = cmd_rx.recv() => {
                     match cmd {
                         Some(WsCommand::Shutdown) | None => break true,
+                        // Subscribe/Unsubscribe: safe to drop here because the
+                        // subscriptions table is already updated by the caller.
+                        // run_ws_session will re-subscribe from that table.
                         _ => {}
                     }
                 }
@@ -508,6 +554,7 @@ async fn connection_task(
             return;
         }
 
+        // Attempt reconnection (with timeout)
         let ws_result = tokio::time::timeout(
             WS_CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async_with_config(&url, Some(ws_config()), false),
@@ -515,7 +562,7 @@ async fn connection_task(
         .await;
         match ws_result {
             Ok(Ok((ws_stream, _))) => {
-                backoff_secs = 1;
+                backoff_secs = 1; // Reset backoff on success
 
                 emit_or_log!(emitter, "stream-status", StreamStatusEvent {
                     account_id: account_id.clone(),
@@ -549,6 +596,7 @@ async fn connection_task(
     }
 }
 
+/// Run a single WebSocket session. Re-subscribes existing channels, then enters the message loop.
 async fn run_ws_session(
     emitter: &Arc<dyn FrontendEmitter>,
     event_bus: &Arc<EventBus>,
@@ -556,13 +604,14 @@ async fn run_ws_session(
     account_id: &str,
     ws_stream: WsStream,
     cmd_rx: &mut mpsc::UnboundedReceiver<WsCommand>,
-    subscriptions: &Arc<Mutex<HashMap<String, SubscriptionInfo>>>,
+    subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
 ) -> WsExitReason {
     let (write, read) = ws_stream.split();
     let write = Arc::new(Mutex::new(write));
 
+    // Collect subscriptions to replay, then drop the lock before doing I/O
     let to_resub: Vec<(String, String, Option<Value>)> = {
-        let subs = subscriptions.lock().await;
+        let subs = subscriptions.read().await;
         subs.iter()
             .filter(|(_, info)| info.account_id == account_id)
             .map(|(sub_id, info)| (sub_id.clone(), info.channel.clone(), info.params.clone()))
@@ -592,17 +641,24 @@ async fn ws_loop(
     mut read: WsRead,
     write: WsWrite,
     cmd_rx: &mut mpsc::UnboundedReceiver<WsCommand>,
-    subscriptions: &Arc<Mutex<HashMap<String, SubscriptionInfo>>>,
+    subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
 ) -> WsExitReason {
     let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
-    ping_interval.tick().await;
+    ping_interval.tick().await; // skip the first immediate tick
 
     loop {
         tokio::select! {
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_ws_message(&**emitter, event_bus, db, account_id, &text, subscriptions).await;
+                        let emitter = emitter.clone();
+                        let event_bus = event_bus.clone();
+                        let db = db.clone();
+                        let account_id = account_id.to_string();
+                        let subscriptions = subscriptions.clone();
+                        tokio::spawn(async move {
+                            handle_ws_message(&*emitter, &event_bus, &db, &account_id, &text, &subscriptions).await;
+                        });
                     }
                     Some(Ok(Message::Ping(data))) => {
                         let mut w = write.lock().await;
@@ -640,6 +696,20 @@ async fn ws_loop(
                             eprintln!("[stream] unsubscribe send failed: {e}");
                         }
                     }
+                    Some(WsCommand::SubNote { id }) => {
+                        let msg = json!({ "type": "subNote", "body": { "id": id } });
+                        let mut w = write.lock().await;
+                        if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
+                            eprintln!("[stream] subNote send failed: {e}");
+                        }
+                    }
+                    Some(WsCommand::UnsubNote { id }) => {
+                        let msg = json!({ "type": "unsubNote", "body": { "id": id } });
+                        let mut w = write.lock().await;
+                        if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
+                            eprintln!("[stream] unsubNote send failed: {e}");
+                        }
+                    }
                     Some(WsCommand::Shutdown) | None => {
                         let mut w = write.lock().await;
                         let _ = w.close().await;
@@ -661,17 +731,41 @@ async fn ws_loop(
 async fn handle_ws_message(
     emitter: &dyn FrontendEmitter,
     event_bus: &EventBus,
-    db: &Database,
+    db: &Arc<Database>,
     account_id: &str,
     text: &str,
-    subscriptions: &Arc<Mutex<HashMap<String, SubscriptionInfo>>>,
+    subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
 ) {
     let msg: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
     };
 
-    if msg.get("type").and_then(|v| v.as_str()) != Some("channel") {
+    let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+
+    // Note Capture: { "type": "noteUpdated", "body": { "id": "...", "type": "...", "body": ... } }
+    if msg_type == "noteUpdated" {
+        if let Some(body) = msg.get("body") {
+            let note_id = body.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let update_type = body.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+            let update_body = body.get("body").cloned().unwrap_or(Value::Null);
+            let payload = StreamNoteCaptureEvent {
+                account_id: account_id.to_string(),
+                note_id: note_id.to_string(),
+                update_type: update_type.to_string(),
+                body: update_body,
+            };
+            event_bus.send(SseEvent {
+                event_type: "note-capture-updated".to_string(),
+                data: serde_json::to_value(&payload).unwrap_or_default(),
+            });
+            emit_or_log!(emitter, "stream-note-capture-updated", payload);
+        }
+        return;
+    }
+
+    // Misskey streaming: { "type": "channel", "body": { "id": "...", "type": "...", "body": ... } }
+    if msg_type != "channel" {
         return;
     }
 
@@ -695,19 +789,27 @@ async fn handle_ws_message(
         None => return,
     };
 
-    let subs = subscriptions.lock().await;
+    let subs = subscriptions.read().await;
     let info = match subs.get(sub_id) {
         Some(i) => i.clone(),
         None => return,
     };
     drop(subs);
 
-    if info.kind == "timeline" && event_type == "note" {
+    let is_note_channel = matches!(info.kind.as_str(), "timeline" | "antenna" | "channel");
+
+    if is_note_channel && event_type == "note" {
         if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
             let note = raw.normalize(account_id, &info.host);
-            if let Err(e) = db.cache_note(&note, &info.timeline_type) {
-                eprintln!("[cache] failed to cache streamed note: {e}");
-            }
+            // Cache to DB asynchronously — don't block the message handler
+            let db = db.clone();
+            let note_clone = note.clone();
+            let timeline_type = info.timeline_type.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = db.cache_note(&note_clone, &timeline_type) {
+                    eprintln!("[cache] failed to cache streamed note: {e}");
+                }
+            });
             let payload = StreamNoteEvent {
                 account_id: account_id.to_string(),
                 subscription_id: sub_id.to_string(),
@@ -719,7 +821,7 @@ async fn handle_ws_message(
             });
             emit_or_log!(emitter, "stream-note", payload);
         }
-    } else if info.kind == "timeline" && event_type == "noteUpdated" {
+    } else if is_note_channel && event_type == "noteUpdated" {
         let note_id = event_body.get("id").and_then(|v| v.as_str()).unwrap_or_default();
         let update_type = event_body.get("type").and_then(|v| v.as_str()).unwrap_or_default();
         let update_body = event_body.get("body").cloned().unwrap_or(Value::Null);
