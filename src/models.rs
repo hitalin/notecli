@@ -417,6 +417,14 @@ pub struct SearchOptions {
 }
 
 impl SearchOptions {
+    pub fn new(limit: i64) -> Self {
+        Self {
+            limit,
+            since_id: None,
+            until_id: None,
+        }
+    }
+
     pub fn limit(&self) -> i64 {
         self.limit.clamp(1, 100)
     }

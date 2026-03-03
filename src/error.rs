@@ -62,7 +62,7 @@ impl NoteDeckError {
     /// Returns a sanitized message safe for the frontend.
     /// Internal details (DB queries, network traces, keychain internals) are
     /// logged to stderr and replaced with generic messages.
-    fn safe_message(&self) -> String {
+    pub fn safe_message(&self) -> String {
         match self {
             Self::Database(e) => {
                 eprintln!("[error] Database: {e}");
