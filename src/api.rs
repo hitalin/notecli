@@ -12,7 +12,7 @@ use crate::models::{
     NormalizedNoteReaction, NormalizedNotification, NormalizedUser, NormalizedUserDetail,
     RawCreateNoteResponse, RawDriveFile, RawEmojisResponse, RawMiAuthResponse, RawNote,
     RawNoteReaction, RawNotification, Antenna, Channel, Clip, RawUser, RawUserDetail,
-    SearchOptions, TimelineOptions, TimelineType, UserList,
+    RawUserReactions, SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
 };
 
 
@@ -622,10 +622,20 @@ impl MisskeyClient {
         &self,
         host: &str,
         token: &str,
-    ) -> Result<HashMap<String, String>, NoteDeckError> {
+    ) -> Result<Vec<ServerEmoji>, NoteDeckError> {
         let data = self.request(host, token, "emojis", json!({})).await?;
         let raw: RawEmojisResponse = serde_json::from_value(data)?;
-        Ok(raw.emojis.into_iter().map(|e| (e.name, e.url)).collect())
+        Ok(raw.emojis.into_iter().map(ServerEmoji::from).collect())
+    }
+
+    pub async fn get_pinned_reactions(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Vec<String>, NoteDeckError> {
+        let data = self.request(host, token, "i", json!({})).await?;
+        let raw: RawUserReactions = serde_json::from_value(data)?;
+        Ok(raw.reactions)
     }
 
     pub async fn get_user_notes(

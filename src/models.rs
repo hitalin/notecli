@@ -613,9 +613,42 @@ pub struct RawEmojisResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RawEmoji {
     pub name: String,
     pub url: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// Emoji info exposed to the frontend via Tauri commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerEmoji {
+    pub name: String,
+    pub url: String,
+    pub category: Option<String>,
+    pub aliases: Vec<String>,
+}
+
+impl From<RawEmoji> for ServerEmoji {
+    fn from(raw: RawEmoji) -> Self {
+        Self {
+            name: raw.name,
+            url: raw.url,
+            category: raw.category,
+            aliases: raw.aliases,
+        }
+    }
+}
+
+/// Response shape for extracting pinned reactions from /api/i.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawUserReactions {
+    #[serde(default)]
+    pub reactions: Vec<String>,
 }
 
 // --- Conversion: Raw -> Normalized ---
