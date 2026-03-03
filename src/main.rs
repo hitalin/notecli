@@ -3,7 +3,7 @@ use std::sync::Arc;
 use notecli::api::MisskeyClient;
 use notecli::db::Database;
 use notecli::event_bus::EventBus;
-use notecli::streaming::{NoopEmitter, StreamingManager};
+use notecli::streaming::{EventBusEmitter, StreamingManager};
 
 #[tokio::main]
 async fn main() {
@@ -21,7 +21,7 @@ async fn main() {
 
     let event_bus = Arc::new(EventBus::new());
 
-    let emitter = Arc::new(NoopEmitter);
+    let emitter = Arc::new(EventBusEmitter::new(event_bus.clone()));
     let _streaming = StreamingManager::new(emitter, event_bus.clone(), db.clone());
 
     // Generate API token

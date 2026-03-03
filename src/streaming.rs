@@ -29,6 +29,26 @@ impl FrontendEmitter for NoopEmitter {
     fn emit(&self, _event: &str, _payload: Value) {}
 }
 
+/// Emitter that forwards events to the EventBus for SSE delivery.
+pub struct EventBusEmitter {
+    event_bus: Arc<EventBus>,
+}
+
+impl EventBusEmitter {
+    pub fn new(event_bus: Arc<EventBus>) -> Self {
+        Self { event_bus }
+    }
+}
+
+impl FrontendEmitter for EventBusEmitter {
+    fn emit(&self, event: &str, payload: Value) {
+        self.event_bus.send(SseEvent {
+            event_type: event.to_string(),
+            data: payload,
+        });
+    }
+}
+
 macro_rules! emit_or_log {
     ($emitter:expr, $event:expr, $payload:expr) => {
         $emitter.emit(
