@@ -383,22 +383,73 @@ impl Database {
         Ok(notes)
     }
 
-    /// Remove cached notes older than 30 days.
+    /// Retained for API compatibility. Notes are now kept indefinitely.
     pub fn cleanup_cache(&self) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
-        let cutoff = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
-            - (30 * 24 * 60 * 60);
-        let deleted: usize = conn.execute(
-            "DELETE FROM notes_cache WHERE cached_at < ?1",
-            params![cutoff],
-        )?;
-        if deleted > 0 {
-            eprintln!("[cache] evicted {deleted} notes older than 30 days");
-        }
         Ok(())
+    }
+
+    /// Return (note_count, db_size_bytes).
+    pub fn cache_stats(&self) -> Result<(i64, i64), NoteDeckError> {
+        let conn = self.lock()?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM notes_cache", [], |row| row.get(0))?;
+        let page_count: i64 =
+            conn.query_row("SELECT page_count FROM pragma_page_count", [], |row| {
+                row.get(0)
+            })?;
+        let page_size: i64 =
+            conn.query_row("SELECT page_size FROM pragma_page_size", [], |row| {
+                row.get(0)
+            })?;
+        Ok((count, page_count * page_size))
+    }
+
+    /// Fetch cached notes created at or before the given ISO 8601 datetime.
+    pub fn get_cached_timeline_before(
+        &self,
+        account_id: &str,
+        timeline_type: &str,
+        before: &str,
+        limit: i64,
+    ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT note_json FROM notes_cache
+             WHERE account_id = ?1 AND timeline_type = ?2 AND created_at <= ?3
+             ORDER BY created_at DESC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![account_id, timeline_type, before, limit], |row| {
+            let json_str: String = row.get(0)?;
+            Ok(json_str)
+        })?;
+        let mut notes = Vec::new();
+        for row in rows {
+            let json_str = row?;
+            if let Ok(note) = serde_json::from_str::<NormalizedNote>(&json_str) {
+                notes.push(note);
+            }
+        }
+        Ok(notes)
+    }
+
+    /// Get the date range (min, max) of cached notes for a timeline.
+    pub fn get_cache_date_range(
+        &self,
+        account_id: &str,
+        timeline_type: &str,
+    ) -> Result<Option<(String, String)>, NoteDeckError> {
+        let conn = self.lock()?;
+        let result: (Option<String>, Option<String>) = conn.query_row(
+            "SELECT MIN(created_at), MAX(created_at) FROM notes_cache
+             WHERE account_id = ?1 AND timeline_type = ?2",
+            params![account_id, timeline_type],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        match result {
+            (Some(min), Some(max)) => Ok(Some((min, max))),
+            _ => Ok(None),
+        }
     }
 
     pub fn upsert_server(&self, server: &StoredServer) -> Result<(), NoteDeckError> {
