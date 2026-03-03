@@ -95,6 +95,18 @@ impl Database {
         // Drop legacy index superseded by FTS5
         conn.execute_batch("DROP INDEX IF EXISTS idx_notes_cache_text")?;
 
+        // OGP cache table
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ogp_cache (
+                url TEXT PRIMARY KEY,
+                title TEXT,
+                description TEXT,
+                image TEXT,
+                site_name TEXT,
+                expires_at INTEGER NOT NULL
+            );",
+        )?;
+
         // Add timeline_type column for per-timeline cache isolation
         let has_tl_col: bool = conn
             .prepare(
@@ -450,6 +462,110 @@ impl Database {
             (Some(min), Some(max)) => Ok(Some((min, max))),
             _ => Ok(None),
         }
+    }
+
+    // --- OGP cache ---
+
+    pub fn cache_ogp(
+        &self,
+        url: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        image: Option<&str>,
+        site_name: Option<&str>,
+        ttl_secs: i64,
+    ) -> Result<(), NoteDeckError> {
+        let conn = self.lock()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO ogp_cache (url, title, description, image, site_name, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(url) DO UPDATE SET
+                 title = excluded.title,
+                 description = excluded.description,
+                 image = excluded.image,
+                 site_name = excluded.site_name,
+                 expires_at = excluded.expires_at",
+            params![url, title, description, image, site_name, now + ttl_secs],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_cached_ogp(
+        &self,
+        url: &str,
+    ) -> Result<
+        Option<(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+        NoteDeckError,
+    > {
+        let conn = self.lock()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let result = conn.query_row(
+            "SELECT title, description, image, site_name FROM ogp_cache WHERE url = ?1 AND expires_at > ?2",
+            params![url, now],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        );
+        match result {
+            Ok(data) => Ok(Some(data)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn load_ogp_cache(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+        NoteDeckError,
+    > {
+        let conn = self.lock()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut stmt = conn.prepare(
+            "SELECT url, title, description, image, site_name FROM ogp_cache WHERE expires_at > ?1 LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![now, limit as i64], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn cleanup_expired_ogp(&self) -> Result<(), NoteDeckError> {
+        let conn = self.lock()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute("DELETE FROM ogp_cache WHERE expires_at <= ?1", params![now])?;
+        Ok(())
     }
 
     pub fn upsert_server(&self, server: &StoredServer) -> Result<(), NoteDeckError> {
