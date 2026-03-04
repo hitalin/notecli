@@ -863,6 +863,28 @@ impl MisskeyClient {
         Ok(())
     }
 
+    pub async fn accept_follow_request(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "following/requests/accept", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn reject_follow_request(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "following/requests/reject", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
     /// Fetch server meta information.
     pub async fn get_meta(
         &self,
