@@ -3,6 +3,8 @@ name = "notecli"
 version = "0.1.0"
 edition = "2021"
 description = "Headless Misskey client — CLI & library"
+repository = "https://github.com/hitalin/notecli"
+license = "MIT"
 
 [dependencies]
 futures-util = "0.3"
