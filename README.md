@@ -12,31 +12,89 @@ cargo install --git https://github.com/hitalin/notecli.git
 
 ## CLI
 
+### アカウント管理
+
 ```sh
-# デーモン起動（デフォルト: localhost:19820）
-notecli daemon [--port 19820]
-
-# アカウント一覧
-notecli accounts
-
-# 投稿
-notecli post "Hello from notecli!" [--cw TEXT] [--visibility home] [--local-only]
-
-# タイムライン取得
-notecli tl [home|local|social|global] [--limit 20]
-
-# 検索
-notecli search "キーワード" [--limit 20]
-
-# 通知
-notecli notifications [--limit 20]
-
-# ノート詳細 / 削除
-notecli note <ID>
-notecli delete <ID>
+notecli login misskey.io          # MiAuth でアカウント登録
+notecli accounts                  # 登録済みアカウント一覧
+notecli logout @user@misskey.io   # アカウント削除
 ```
 
-全コマンド共通オプション: `--account / -a`（アカウント指定）、`--json`（JSON 出力）
+### ノート操作
+
+```sh
+notecli post "Hello!" [--cw TEXT] [--visibility home] [--reply-to ID] [--local-only]
+notecli note <ID>                 # ノート詳細
+notecli update <ID> "新しいテキスト" [--cw TEXT]  # ノート編集
+notecli delete <ID>               # ノート削除
+notecli renote <ID>               # リノート（ブースト）
+```
+
+### タイムライン・検索
+
+```sh
+notecli tl [home|local|social|global] [-l 20]   # タイムライン取得
+notecli search "キーワード" [-l 20]              # 全文検索
+notecli replies <ID> [-l 20]                     # 返信一覧
+notecli thread <ID> [-l 20]                      # 会話スレッド
+```
+
+### 通知・メンション
+
+```sh
+notecli notifications [-l 20]    # 通知一覧
+notecli mentions [-l 20]         # メンション一覧
+```
+
+### リアクション
+
+```sh
+notecli react <NOTE_ID> ":star:"   # リアクション追加
+notecli unreact <NOTE_ID>          # リアクション削除
+```
+
+### ユーザー操作
+
+```sh
+notecli user @user@host           # ユーザー詳細
+notecli user-notes <USER_ID> [-l 20]  # ユーザーのノート一覧
+notecli follow <USER_ID>          # フォロー
+notecli unfollow <USER_ID>        # フォロー解除
+```
+
+### お気に入り
+
+```sh
+notecli favorite <NOTE_ID>       # お気に入り追加
+notecli unfavorite <NOTE_ID>     # お気に入り削除
+notecli favorites [-l 20]        # お気に入り一覧
+```
+
+### その他
+
+```sh
+notecli emojis                    # カスタム絵文字一覧
+notecli daemon [--port 19820]     # HTTP APIサーバー起動
+```
+
+### 共通オプション
+
+| オプション | 説明 |
+|-----------|------|
+| `--account / -a` | 操作するアカウントを指定 |
+| `--json` | JSON 配列/オブジェクトで出力 |
+| `--jsonl` | NDJSON 出力（jq 向け） |
+| `--compact / -c` | TSV 1行1レコード（fzf/grep 向け） |
+| `--ids` | ID のみ出力（パイプ/xargs 向け） |
+
+### Unix ツール連携
+
+```sh
+notecli tl -c | fzf --with-nth=2.. | cut -f1 | xargs -I{} notecli react {} :star:
+notecli tl --ids -l 5 | xargs -I{} notecli react {} :thumbsup:
+notecli tl --jsonl | jq -r 'select(.user.username == "taka") | .id'
+notecli tl -c -l 100 | grep "Rust" | cut -f1
+```
 
 ## HTTP API
 
