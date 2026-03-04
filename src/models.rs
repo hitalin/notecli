@@ -160,6 +160,24 @@ pub struct NormalizedUser {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UserRole {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub icon_url: Option<String>,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub display_order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserField {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NormalizedUserDetail {
     pub id: String,
     pub username: String,
@@ -188,6 +206,16 @@ pub struct NormalizedUserDetail {
     pub avatar_decorations: Vec<AvatarDecoration>,
     #[serde(default)]
     pub emojis: HashMap<String, String>,
+    #[serde(default)]
+    pub roles: Vec<UserRole>,
+    #[serde(default)]
+    pub fields: Vec<UserField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthday: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -564,6 +592,24 @@ pub struct RawNotification {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RawUserRole {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub icon_url: Option<String>,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub display_order: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawUserField {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RawUserDetail {
     pub id: String,
     pub username: String,
@@ -592,6 +638,13 @@ pub struct RawUserDetail {
     pub avatar_decorations: Vec<AvatarDecoration>,
     #[serde(default)]
     pub emojis: HashMap<String, String>,
+    #[serde(default)]
+    pub roles: Vec<RawUserRole>,
+    #[serde(default)]
+    pub fields: Vec<RawUserField>,
+    pub url: Option<String>,
+    pub birthday: Option<String>,
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -792,6 +845,29 @@ impl RawUserDetail {
             created_at: self.created_at,
             avatar_decorations: self.avatar_decorations,
             emojis: self.emojis,
+            roles: self
+                .roles
+                .into_iter()
+                .map(|r| UserRole {
+                    id: r.id,
+                    name: r.name,
+                    color: r.color,
+                    icon_url: r.icon_url,
+                    description: r.description,
+                    display_order: r.display_order,
+                })
+                .collect(),
+            fields: self
+                .fields
+                .into_iter()
+                .map(|f| UserField {
+                    name: f.name,
+                    value: f.value,
+                })
+                .collect(),
+            url: self.url,
+            birthday: self.birthday,
+            location: self.location,
         }
     }
 }
