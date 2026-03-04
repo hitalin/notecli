@@ -11,6 +11,17 @@ use notecli::models::{
 };
 use notecli::streaming::{EventBusEmitter, StreamingManager};
 
+// --- Output format ---
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OutputFormat {
+    Default,
+    Json,
+    Ids,
+    Compact,
+    Jsonl,
+}
+
 #[derive(Parser)]
 #[command(
     name = "notecli",
@@ -19,31 +30,63 @@ use notecli::streaming::{EventBusEmitter, StreamingManager};
         Misskey インスタンスへの投稿、タイムライン取得、リアクション、\n\
         ユーザー操作などを CLI から実行できます。\n\n\
         データは ~/.local/share/notecli/ に保存されます。\n\
-        認証トークンは OS のキーチェーン（利用可能な場合）に安全に保管されます。\n\n\
-        全コマンドで --json フラグを使うと、AI エージェント向けの\n\
-        構造化 JSON 出力に切り替わります。",
-    after_long_help = "使用例:\n\
-        \x20 アカウント登録:    notecli login misskey.io\n\
-        \x20 投稿:              notecli post \"Hello, world!\"\n\
-        \x20 CW付き投稿:        notecli post \"内容\" --cw \"注意\"\n\
-        \x20 返信:              notecli post \"返事\" --reply-to <NOTE_ID>\n\
-        \x20 タイムライン:      notecli tl home -l 10\n\
-        \x20 通知確認:          notecli notifications\n\
-        \x20 リアクション:      notecli react <NOTE_ID> \":star:\"\n\
-        \x20 ユーザー表示:      notecli user @user@host\n\
-        \x20 JSON出力(AI向け):  notecli --json tl home"
+        認証トークンは OS のキーチェーン（利用可能な場合）に安全に保管されます。",
+    after_long_help = "出力形式:\n\
+        \x20 (デフォルト)  人間向け複数行表示\n\
+        \x20 --json        JSON配列/オブジェクト\n\
+        \x20 --jsonl       NDJSON (1行1JSON、jq向け)\n\
+        \x20 --compact/-c  TSV 1行1レコード (fzf/grep向け)\n\
+        \x20 --ids         IDのみ (パイプ/xargs向け)\n\n\
+        使用例:\n\
+        \x20 notecli login misskey.io\n\
+        \x20 notecli post \"Hello, world!\"\n\
+        \x20 notecli tl home -l 10\n\
+        \x20 notecli react <NOTE_ID> \":star:\"\n\n\
+        Unix ツール連携:\n\
+        \x20 notecli tl -c | fzf --with-nth=2.. | cut -f1 | xargs -I{} notecli react {} :star:\n\
+        \x20 notecli tl --ids -l 5 | xargs -I{} notecli react {} :thumbsup:\n\
+        \x20 notecli tl --jsonl | jq -r 'select(.user.username == \"taka\") | .id'\n\
+        \x20 notecli tl -c -l 100 | grep \"Rust\" | cut -f1"
 )]
 struct Cli {
     /// 操作するアカウントを指定 (形式: @user@host, アカウントID, ユーザー名)
     #[arg(long, short = 'a', global = true)]
     account: Option<String>,
 
-    /// JSON形式で出力 (AIエージェント・プログラム連携向け)
-    #[arg(long, global = true)]
+    /// JSON配列/オブジェクトで出力
+    #[arg(long, global = true, group = "output_format")]
     json: bool,
+
+    /// IDのみ出力、1行1ID (パイプ/xargs向け)
+    #[arg(long, global = true, group = "output_format")]
+    ids: bool,
+
+    /// TSV 1行1レコードで出力 (fzf/grep/awk向け)
+    #[arg(long, short = 'c', global = true, group = "output_format")]
+    compact: bool,
+
+    /// NDJSON出力、1行1JSONオブジェクト (jqストリーミング向け)
+    #[arg(long, global = true, group = "output_format")]
+    jsonl: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+impl Cli {
+    fn output_format(&self) -> OutputFormat {
+        if self.json {
+            OutputFormat::Json
+        } else if self.ids {
+            OutputFormat::Ids
+        } else if self.compact {
+            OutputFormat::Compact
+        } else if self.jsonl {
+            OutputFormat::Jsonl
+        } else {
+            OutputFormat::Default
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -131,7 +174,7 @@ enum Commands {
         after_long_help = "使用例:\n\
             \x20 notecli tl\n\
             \x20 notecli tl local -l 10\n\
-            \x20 notecli tl global --limit 50"
+            \x20 notecli tl -c | fzf --with-nth=2.. | cut -f1"
     )]
     Tl {
         /// タイムラインの種類: home, local, social, global
@@ -245,8 +288,9 @@ enum Commands {
             Unicode絵文字はそのまま指定できます。",
         after_long_help = "使用例:\n\
             \x20 notecli react 9abcdef123 \":star:\"\n\
-            \x20 notecli react 9abcdef123 \":thumbsup:\"\n\
-            \x20 notecli react 9abcdef123 \"👍\""
+            \x20 notecli react 9abcdef123 \"👍\"\n\n\
+            バッチ:\n\
+            \x20 notecli tl --ids -l 5 | xargs -I{} notecli react {} :star:"
     )]
     React {
         /// 対象ノートID
@@ -266,8 +310,7 @@ enum Commands {
 
     /// ノートをリノート（ブースト）
     #[command(
-        long_about = "指定したノートをリノート（ブースト/シェア）します。\n\
-            引用リノートは post コマンドに --quote オプションで行えます。",
+        long_about = "指定したノートをリノート（ブースト/シェア）します。",
         after_long_help = "使用例:\n\
             \x20 notecli renote 9abcdef123"
     )]
@@ -360,13 +403,18 @@ async fn main() {
             };
             run_daemon(port).await;
         }
-        Some(cmd) => {
-            if let Err(e) = run_cli(cmd, cli.account.as_deref(), cli.json).await {
-                if cli.json {
-                    let err = serde_json::json!({ "error": e.code(), "message": e.safe_message() });
-                    eprintln!("{}", err);
-                } else {
-                    eprintln!("Error: {}", e.safe_message());
+        Some(ref cmd) => {
+            let fmt = cli.output_format();
+            if let Err(e) = run_cli(cmd, cli.account.as_deref(), fmt).await {
+                match fmt {
+                    OutputFormat::Json | OutputFormat::Jsonl => {
+                        let err =
+                            serde_json::json!({ "error": e.code(), "message": e.safe_message() });
+                        eprintln!("{}", err);
+                    }
+                    _ => {
+                        eprintln!("Error: {}", e.safe_message());
+                    }
                 }
                 std::process::exit(1);
             }
@@ -408,9 +456,9 @@ async fn run_daemon(port: u16) {
 }
 
 async fn run_cli(
-    cmd: Commands,
+    cmd: &Commands,
     account_spec: Option<&str>,
-    json: bool,
+    fmt: OutputFormat,
 ) -> Result<(), NoteDeckError> {
     let data_dir = dirs_data_dir().join("notecli");
     std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
@@ -422,26 +470,47 @@ async fn run_cli(
     match &cmd {
         Commands::Accounts => {
             let accounts = db.load_accounts()?;
-            if json {
-                let public: Vec<AccountPublic> = accounts.iter().map(AccountPublic::from).collect();
-                println!("{}", serde_json::to_string(&public).unwrap());
-            } else {
-                if accounts.is_empty() {
-                    println!("No accounts found. Use 'notecli login <HOST>' to add one.");
-                } else {
+            match fmt {
+                OutputFormat::Json => {
+                    let public: Vec<AccountPublic> =
+                        accounts.iter().map(AccountPublic::from).collect();
+                    println!("{}", serde_json::to_string(&public).unwrap());
+                }
+                OutputFormat::Jsonl => {
+                    for a in &accounts {
+                        let public = AccountPublic::from(a);
+                        println!("{}", serde_json::to_string(&public).unwrap());
+                    }
+                }
+                OutputFormat::Ids => {
+                    for a in &accounts {
+                        println!("{}", a.id);
+                    }
+                }
+                OutputFormat::Compact => {
                     for a in &accounts {
                         let name = a.display_name.as_deref().unwrap_or(&a.username);
-                        println!("@{}@{} ({}) {}", a.username, a.host, a.id, name);
+                        println!("{}\t@{}@{}\t{}", a.id, a.username, a.host, name);
+                    }
+                }
+                OutputFormat::Default => {
+                    if accounts.is_empty() {
+                        println!("No accounts found. Use 'notecli login <HOST>' to add one.");
+                    } else {
+                        for a in &accounts {
+                            let name = a.display_name.as_deref().unwrap_or(&a.username);
+                            println!("@{}@{} ({}) {}", a.username, a.host, a.id, name);
+                        }
                     }
                 }
             }
             return Ok(());
         }
         Commands::Login { host } => {
-            return run_login(&db, host, json).await;
+            return run_login(&db, host, fmt).await;
         }
         Commands::Logout { target } => {
-            return run_logout(&db, target, json);
+            return run_logout(&db, target, fmt);
         }
         _ => {}
     }
@@ -459,22 +528,27 @@ async fn run_cli(
             local_only,
         } => {
             let params = CreateNoteParams {
-                text: Some(text),
-                cw,
-                visibility: Some(visibility),
-                local_only: if local_only { Some(true) } else { None },
+                text: Some(text.clone()),
+                cw: cw.clone(),
+                visibility: Some(visibility.clone()),
+                local_only: if *local_only { Some(true) } else { None },
                 mode_flags: None,
-                reply_id: reply_to,
+                reply_id: reply_to.clone(),
                 renote_id: None,
                 file_ids: None,
             };
             let note = client
                 .create_note(&host, &token, &account.id, params)
                 .await?;
-            if json {
-                println!("{}", serde_json::to_string(&note).unwrap());
-            } else {
-                println!("Posted: https://{}/notes/{}", host, note.id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!("{}", serde_json::to_string(&note).unwrap());
+                }
+                OutputFormat::Ids => println!("{}", note.id),
+                OutputFormat::Compact => print_note_compact(&note),
+                OutputFormat::Default => {
+                    println!("Posted: https://{}/notes/{}", host, note.id);
+                }
             }
         }
         Commands::Tl { r#type, limit } => {
@@ -483,11 +557,11 @@ async fn run_cli(
                     &host,
                     &token,
                     &account.id,
-                    TimelineType::new(&r#type),
-                    TimelineOptions::new(limit, None, None),
+                    TimelineType::new(r#type),
+                    TimelineOptions::new(*limit, None, None),
                 )
                 .await?;
-            print_notes(&notes, json);
+            print_notes(&notes, fmt);
         }
         Commands::Search { query, limit } => {
             let notes = client
@@ -496,10 +570,10 @@ async fn run_cli(
                     &token,
                     &account.id,
                     &query,
-                    SearchOptions::new(limit),
+                    SearchOptions::new(*limit),
                 )
                 .await?;
-            print_notes(&notes, json);
+            print_notes(&notes, fmt);
         }
         Commands::Notifications { limit } => {
             let notifications = client
@@ -507,55 +581,54 @@ async fn run_cli(
                     &host,
                     &token,
                     &account.id,
-                    TimelineOptions::new(limit, None, None),
+                    TimelineOptions::new(*limit, None, None),
                 )
                 .await?;
-            if json {
-                println!("{}", serde_json::to_string(&notifications).unwrap());
-            } else {
-                for n in &notifications {
-                    print_notification(n);
-                }
-            }
+            print_notifications(&notifications, fmt);
         }
         Commands::Mentions { limit } => {
             let notes = client
-                .get_mentions(&host, &token, &account.id, limit, None, None, None)
+                .get_mentions(&host, &token, &account.id, *limit, None, None, None)
                 .await?;
-            print_notes(&notes, json);
+            print_notes(&notes, fmt);
         }
         Commands::Note { id } => {
             let note = client.get_note(&host, &token, &account.id, &id).await?;
-            if json {
-                println!("{}", serde_json::to_string(&note).unwrap());
-            } else {
-                print_note_detail(&note);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!("{}", serde_json::to_string(&note).unwrap());
+                }
+                OutputFormat::Ids => println!("{}", note.id),
+                OutputFormat::Compact => print_note_compact(&note),
+                OutputFormat::Default => print_note_detail(&note),
             }
         }
         Commands::Replies { id, limit } => {
             let notes = client
-                .get_note_children(&host, &token, &account.id, &id, limit as u32)
+                .get_note_children(&host, &token, &account.id, id, *limit as u32)
                 .await?;
-            print_notes(&notes, json);
+            print_notes(&notes, fmt);
         }
         Commands::Thread { id, limit } => {
             let notes = client
-                .get_note_conversation(&host, &token, &account.id, &id, limit as u32)
+                .get_note_conversation(&host, &token, &account.id, id, *limit as u32)
                 .await?;
-            print_notes(&notes, json);
+            print_notes(&notes, fmt);
         }
         Commands::Delete { id } => {
             client.delete_note(&host, &token, &id).await?;
-            if json {
-                println!(r#"{{"deleted":"{}"}}"#, id);
-            } else {
-                println!("Deleted: {}", id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(r#"{{"deleted":"{}"}}"#, id);
+                }
+                OutputFormat::Ids => println!("{}", id),
+                _ => println!("Deleted: {}", id),
             }
         }
         Commands::Update { id, text, cw } => {
             let params = CreateNoteParams {
-                text: Some(text),
-                cw,
+                text: Some(text.clone()),
+                cw: cw.clone(),
                 visibility: None,
                 local_only: None,
                 mode_flags: None,
@@ -564,31 +637,37 @@ async fn run_cli(
                 file_ids: None,
             };
             client.update_note(&host, &token, &id, params).await?;
-            if json {
-                println!(r#"{{"updated":"{}"}}"#, id);
-            } else {
-                println!("Updated: {}", id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(r#"{{"updated":"{}"}}"#, id);
+                }
+                OutputFormat::Ids => println!("{}", id),
+                _ => println!("Updated: {}", id),
             }
         }
         Commands::React { note_id, reaction } => {
             client
                 .create_reaction(&host, &token, &note_id, &reaction)
                 .await?;
-            if json {
-                println!(
-                    r#"{{"reacted":"{}","reaction":"{}"}}"#,
-                    note_id, reaction
-                );
-            } else {
-                println!("Reacted {} to {}", reaction, note_id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(
+                        r#"{{"reacted":"{}","reaction":"{}"}}"#,
+                        note_id, reaction
+                    );
+                }
+                OutputFormat::Ids => println!("{}", note_id),
+                _ => println!("Reacted {} to {}", reaction, note_id),
             }
         }
         Commands::Unreact { note_id } => {
             client.delete_reaction(&host, &token, &note_id).await?;
-            if json {
-                println!(r#"{{"unreacted":"{}"}}"#, note_id);
-            } else {
-                println!("Unreacted from {}", note_id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(r#"{{"unreacted":"{}"}}"#, note_id);
+                }
+                OutputFormat::Ids => println!("{}", note_id),
+                _ => println!("Unreacted from {}", note_id),
             }
         }
         Commands::Renote { note_id } => {
@@ -605,18 +684,39 @@ async fn run_cli(
             let note = client
                 .create_note(&host, &token, &account.id, params)
                 .await?;
-            if json {
-                println!("{}", serde_json::to_string(&note).unwrap());
-            } else {
-                println!("Renoted: https://{}/notes/{}", host, note.id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!("{}", serde_json::to_string(&note).unwrap());
+                }
+                OutputFormat::Ids => println!("{}", note.id),
+                OutputFormat::Compact => print_note_compact(&note),
+                OutputFormat::Default => {
+                    println!("Renoted: https://{}/notes/{}", host, note.id);
+                }
             }
         }
         Commands::User { target } => {
             let detail = resolve_and_get_user(&client, &host, &token, &target).await?;
-            if json {
-                println!("{}", serde_json::to_string(&detail).unwrap());
-            } else {
-                print_user_detail(&detail);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!("{}", serde_json::to_string(&detail).unwrap());
+                }
+                OutputFormat::Ids => println!("{}", detail.id),
+                OutputFormat::Compact => {
+                    let host_str = detail.host.as_deref().unwrap_or("(local)");
+                    let name = detail.name.as_deref().unwrap_or(&detail.username);
+                    println!(
+                        "{}\t@{}@{}\t{}\tnotes:{}\tfollowing:{}\tfollowers:{}",
+                        detail.id,
+                        detail.username,
+                        host_str,
+                        oneline(name),
+                        detail.notes_count,
+                        detail.following_count,
+                        detail.followers_count
+                    );
+                }
+                OutputFormat::Default => print_user_detail(&detail),
             }
         }
         Commands::UserNotes { user_id, limit } => {
@@ -626,58 +726,86 @@ async fn run_cli(
                     &token,
                     &account.id,
                     &user_id,
-                    TimelineOptions::new(limit, None, None),
+                    TimelineOptions::new(*limit, None, None),
                 )
                 .await?;
-            print_notes(&notes, json);
+            print_notes(&notes, fmt);
         }
         Commands::Follow { user_id } => {
             client.follow_user(&host, &token, &user_id).await?;
-            if json {
-                println!(r#"{{"followed":"{}"}}"#, user_id);
-            } else {
-                println!("Followed: {}", user_id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(r#"{{"followed":"{}"}}"#, user_id);
+                }
+                OutputFormat::Ids => println!("{}", user_id),
+                _ => println!("Followed: {}", user_id),
             }
         }
         Commands::Unfollow { user_id } => {
             client.unfollow_user(&host, &token, &user_id).await?;
-            if json {
-                println!(r#"{{"unfollowed":"{}"}}"#, user_id);
-            } else {
-                println!("Unfollowed: {}", user_id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(r#"{{"unfollowed":"{}"}}"#, user_id);
+                }
+                OutputFormat::Ids => println!("{}", user_id),
+                _ => println!("Unfollowed: {}", user_id),
             }
         }
         Commands::Favorite { note_id } => {
             client.create_favorite(&host, &token, &note_id).await?;
-            if json {
-                println!(r#"{{"favorited":"{}"}}"#, note_id);
-            } else {
-                println!("Favorited: {}", note_id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(r#"{{"favorited":"{}"}}"#, note_id);
+                }
+                OutputFormat::Ids => println!("{}", note_id),
+                _ => println!("Favorited: {}", note_id),
             }
         }
         Commands::Unfavorite { note_id } => {
             client.delete_favorite(&host, &token, &note_id).await?;
-            if json {
-                println!(r#"{{"unfavorited":"{}"}}"#, note_id);
-            } else {
-                println!("Unfavorited: {}", note_id);
+            match fmt {
+                OutputFormat::Json | OutputFormat::Jsonl => {
+                    println!(r#"{{"unfavorited":"{}"}}"#, note_id);
+                }
+                OutputFormat::Ids => println!("{}", note_id),
+                _ => println!("Unfavorited: {}", note_id),
             }
         }
         Commands::Favorites { limit } => {
             let notes = client
-                .get_favorites(&host, &token, &account.id, limit, None, None)
+                .get_favorites(&host, &token, &account.id, *limit, None, None)
                 .await?;
-            print_notes(&notes, json);
+            print_notes(&notes, fmt);
         }
         Commands::Emojis => {
             let emojis = client.get_server_emojis(&host, &token).await?;
-            if json {
-                println!("{}", serde_json::to_string(&emojis).unwrap());
-            } else {
-                print_emojis(&emojis);
+            match fmt {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string(&emojis).unwrap());
+                }
+                OutputFormat::Jsonl => {
+                    for e in &emojis {
+                        println!("{}", serde_json::to_string(e).unwrap());
+                    }
+                }
+                OutputFormat::Ids => {
+                    for e in &emojis {
+                        println!(":{}:", e.name);
+                    }
+                }
+                OutputFormat::Compact => {
+                    for e in &emojis {
+                        let cat = e.category.as_deref().unwrap_or("");
+                        println!(":{}:\t{}\t{}", e.name, cat, e.aliases.join(","));
+                    }
+                }
+                OutputFormat::Default => print_emojis(&emojis),
             }
         }
-        Commands::Accounts | Commands::Daemon { .. } | Commands::Login { .. } | Commands::Logout { .. } => {
+        Commands::Accounts
+        | Commands::Daemon { .. }
+        | Commands::Login { .. }
+        | Commands::Logout { .. } => {
             unreachable!()
         }
     }
@@ -687,7 +815,7 @@ async fn run_cli(
 
 // --- Login / Logout ---
 
-async fn run_login(db: &Database, host: &str, json: bool) -> Result<(), NoteDeckError> {
+async fn run_login(db: &Database, host: &str, fmt: OutputFormat) -> Result<(), NoteDeckError> {
     let client = MisskeyClient::new()?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -719,17 +847,20 @@ async fn run_login(db: &Database, host: &str, json: bool) -> Result<(), NoteDeck
         "https://{host}/miauth/{session_id}?name=notecli&permission={permission_str}"
     );
 
-    if json {
-        println!(
-            r#"{{"authUrl":"{}","sessionId":"{}","status":"waiting"}}"#,
-            auth_url, session_id
-        );
-    } else {
-        println!("以下のURLをブラウザで開いて認証してください:");
-        println!();
-        println!("  {}", auth_url);
-        println!();
-        println!("認証が完了したらEnterを押してください...");
+    match fmt {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                r#"{{"authUrl":"{}","sessionId":"{}","status":"waiting"}}"#,
+                auth_url, session_id
+            );
+        }
+        _ => {
+            println!("以下のURLをブラウザで開いて認証してください:");
+            println!();
+            println!("  {}", auth_url);
+            println!();
+            println!("認証が完了したらEnterを押してください...");
+        }
     }
 
     // Wait for user to press Enter
@@ -759,20 +890,30 @@ async fn run_login(db: &Database, host: &str, json: bool) -> Result<(), NoteDeck
         let _ = db.clear_token(&account_id);
     }
 
-    if json {
-        let public = AccountPublic::from(&account);
-        println!("{}", serde_json::to_string(&public).unwrap());
-    } else {
-        println!(
-            "Login successful: @{}@{}",
-            auth.user.username, host
-        );
+    match fmt {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            let public = AccountPublic::from(&account);
+            println!("{}", serde_json::to_string(&public).unwrap());
+        }
+        OutputFormat::Ids => println!("{}", account_id),
+        OutputFormat::Compact => {
+            println!(
+                "{}\t@{}@{}\t{}",
+                account_id,
+                auth.user.username,
+                host,
+                auth.user.name.as_deref().unwrap_or(&auth.user.username)
+            );
+        }
+        OutputFormat::Default => {
+            println!("Login successful: @{}@{}", auth.user.username, host);
+        }
     }
 
     Ok(())
 }
 
-fn run_logout(db: &Database, target: &str, json: bool) -> Result<(), NoteDeckError> {
+fn run_logout(db: &Database, target: &str, fmt: OutputFormat) -> Result<(), NoteDeckError> {
     let account = resolve_account(db, Some(target))?;
     let username = account.username.clone();
     let host = account.host.clone();
@@ -783,10 +924,15 @@ fn run_logout(db: &Database, target: &str, json: bool) -> Result<(), NoteDeckErr
 
     db.delete_account(&id)?;
 
-    if json {
-        println!(r#"{{"loggedOut":"{}","username":"{}","host":"{}"}}"#, id, username, host);
-    } else {
-        println!("Logged out: @{}@{}", username, host);
+    match fmt {
+        OutputFormat::Json | OutputFormat::Jsonl => {
+            println!(
+                r#"{{"loggedOut":"{}","username":"{}","host":"{}"}}"#,
+                id, username, host
+            );
+        }
+        OutputFormat::Ids => println!("{}", id),
+        _ => println!("Logged out: @{}@{}", username, host),
     }
 
     Ok(())
@@ -851,14 +997,64 @@ async fn resolve_and_get_user(
 
 // --- Output formatting ---
 
-fn print_notes(notes: &[NormalizedNote], json: bool) {
-    if json {
-        println!("{}", serde_json::to_string(notes).unwrap());
-        return;
+/// Collapse whitespace (newlines, tabs, spaces) into single spaces.
+fn oneline(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Build a one-line text representation of a note for compact output.
+fn compact_note_text(note: &NormalizedNote) -> String {
+    let mut parts = Vec::new();
+    if let Some(ref cw) = note.cw {
+        parts.push(format!("[CW: {}]", oneline(cw)));
     }
-    for note in notes {
-        print_note_detail(note);
+    if let Some(ref text) = note.text {
+        parts.push(oneline(text));
+    } else if let Some(ref renote) = note.renote {
+        let ru = format_user(&renote.user);
+        let rt = renote.text.as_deref().unwrap_or("");
+        parts.push(format!("[RN {}] {}", ru, oneline(rt)));
     }
+    if parts.is_empty() {
+        "(empty)".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn print_notes(notes: &[NormalizedNote], fmt: OutputFormat) {
+    match fmt {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string(notes).unwrap());
+        }
+        OutputFormat::Jsonl => {
+            for note in notes {
+                println!("{}", serde_json::to_string(note).unwrap());
+            }
+        }
+        OutputFormat::Ids => {
+            for note in notes {
+                println!("{}", note.id);
+            }
+        }
+        OutputFormat::Compact => {
+            for note in notes {
+                print_note_compact(note);
+            }
+        }
+        OutputFormat::Default => {
+            for note in notes {
+                print_note_detail(note);
+            }
+        }
+    }
+}
+
+fn print_note_compact(note: &NormalizedNote) {
+    let user = format_user(&note.user);
+    let time = &note.created_at[..16].replace('T', " ");
+    let text = compact_note_text(note);
+    println!("{}\t{}\t{}\t{}", note.id, user, time, text);
 }
 
 fn print_note_detail(note: &NormalizedNote) {
@@ -883,6 +1079,62 @@ fn print_note_detail(note: &NormalizedNote) {
         );
     }
     println!();
+}
+
+fn print_notifications(notifications: &[NormalizedNotification], fmt: OutputFormat) {
+    match fmt {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string(notifications).unwrap());
+        }
+        OutputFormat::Jsonl => {
+            for n in notifications {
+                println!("{}", serde_json::to_string(n).unwrap());
+            }
+        }
+        OutputFormat::Ids => {
+            for n in notifications {
+                if let Some(ref note) = n.note {
+                    println!("{}", note.id);
+                } else {
+                    println!("{}", n.id);
+                }
+            }
+        }
+        OutputFormat::Compact => {
+            for n in notifications {
+                print_notification_compact(n);
+            }
+        }
+        OutputFormat::Default => {
+            for n in notifications {
+                print_notification(n);
+            }
+        }
+    }
+}
+
+fn print_notification_compact(n: &NormalizedNotification) {
+    let user = n
+        .user
+        .as_ref()
+        .map(|u| format_user(u))
+        .unwrap_or_default();
+    let note_id = n
+        .note
+        .as_ref()
+        .map(|n| n.id.as_str())
+        .unwrap_or("-");
+    let reaction = n.reaction.as_deref().unwrap_or("");
+    let preview = n
+        .note
+        .as_ref()
+        .and_then(|n| n.text.as_deref())
+        .map(|t| oneline(t))
+        .unwrap_or_default();
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        note_id, n.notification_type, user, reaction, preview
+    );
 }
 
 fn print_notification(n: &NormalizedNotification) {
