@@ -5,6 +5,24 @@ use std::sync::{Mutex, MutexGuard};
 use crate::error::NoteDeckError;
 use crate::models::{Account, NormalizedNote, StoredServer};
 
+/// A row from the ogp_cache table, mapped to structured fields.
+#[derive(Debug, Clone)]
+pub struct SummaryRow {
+    pub url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub thumbnail: Option<String>,
+    pub sitename: Option<String>,
+    pub icon: Option<String>,
+    pub player_url: Option<String>,
+    pub player_width: Option<u32>,
+    pub player_height: Option<u32>,
+    pub player_allow: Option<String>,
+    pub final_url: Option<String>,
+    pub sensitive: bool,
+    pub medias_json: Option<String>,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }
@@ -106,6 +124,34 @@ impl Database {
                 expires_at INTEGER NOT NULL
             );",
         )?;
+
+        // Add summaly-compatible columns to ogp_cache
+        let has_icon_col: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('ogp_cache') WHERE name='icon'")?
+            .query_row([], |row| row.get(0))?;
+        if !has_icon_col {
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN icon TEXT", [])?;
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_url TEXT", [])?;
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_width INTEGER", [])?;
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_height INTEGER", [])?;
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_allow TEXT", [])?;
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN final_url TEXT", [])?;
+            conn.execute(
+                "ALTER TABLE ogp_cache ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN medias_json TEXT", [])?;
+        }
+
+        // Add player_allow column (for existing DBs that already have icon but not player_allow)
+        let has_player_allow: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('ogp_cache') WHERE name='player_allow'",
+            )?
+            .query_row([], |row| row.get(0))?;
+        if !has_player_allow {
+            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_allow TEXT", [])?;
+        }
 
         // Add timeline_type column for per-timeline cache isolation
         let has_tl_col: bool = conn
@@ -400,6 +446,16 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a single note from the cache (e.g. when a deletion event is received).
+    pub fn delete_cached_note(&self, note_id: &str) -> Result<(), NoteDeckError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM notes_cache WHERE note_id = ?1",
+            params![note_id],
+        )?;
+        Ok(())
+    }
+
     /// Return (note_count, db_size_bytes).
     pub fn cache_stats(&self) -> Result<(i64, i64), NoteDeckError> {
         let conn = self.lock()?;
@@ -464,15 +520,12 @@ impl Database {
         }
     }
 
-    // --- OGP cache ---
+    // --- OGP / Summary cache ---
 
-    pub fn cache_ogp(
+    pub fn cache_summary(
         &self,
         url: &str,
-        title: Option<&str>,
-        description: Option<&str>,
-        image: Option<&str>,
-        site_name: Option<&str>,
+        row: &SummaryRow,
         ttl_secs: i64,
     ) -> Result<(), NoteDeckError> {
         let conn = self.lock()?;
@@ -481,40 +534,53 @@ impl Database {
             .unwrap_or_default()
             .as_secs() as i64;
         conn.execute(
-            "INSERT INTO ogp_cache (url, title, description, image, site_name, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO ogp_cache (url, title, description, image, site_name, icon, player_url, player_width, player_height, player_allow, final_url, sensitive, medias_json, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(url) DO UPDATE SET
                  title = excluded.title,
                  description = excluded.description,
                  image = excluded.image,
                  site_name = excluded.site_name,
+                 icon = excluded.icon,
+                 player_url = excluded.player_url,
+                 player_width = excluded.player_width,
+                 player_height = excluded.player_height,
+                 player_allow = excluded.player_allow,
+                 final_url = excluded.final_url,
+                 sensitive = excluded.sensitive,
+                 medias_json = excluded.medias_json,
                  expires_at = excluded.expires_at",
-            params![url, title, description, image, site_name, now + ttl_secs],
+            params![
+                url,
+                row.title,
+                row.description,
+                row.thumbnail,
+                row.sitename,
+                row.icon,
+                row.player_url,
+                row.player_width,
+                row.player_height,
+                row.player_allow,
+                row.final_url,
+                row.sensitive as i32,
+                row.medias_json,
+                now + ttl_secs
+            ],
         )?;
         Ok(())
     }
 
-    pub fn get_cached_ogp(
-        &self,
-        url: &str,
-    ) -> Result<
-        Option<(
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )>,
-        NoteDeckError,
-    > {
+    pub fn get_cached_summary(&self, url: &str) -> Result<Option<SummaryRow>, NoteDeckError> {
         let conn = self.lock()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let result = conn.query_row(
-            "SELECT title, description, image, site_name FROM ogp_cache WHERE url = ?1 AND expires_at > ?2",
+            "SELECT title, description, image, site_name, icon, player_url, player_width, player_height, player_allow, final_url, sensitive, medias_json
+             FROM ogp_cache WHERE url = ?1 AND expires_at > ?2",
             params![url, now],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Self::row_to_summary(url, row),
         );
         match result {
             Ok(data) => Ok(Some(data)),
@@ -523,39 +589,52 @@ impl Database {
         }
     }
 
-    pub fn load_ogp_cache(
-        &self,
-        limit: usize,
-    ) -> Result<
-        Vec<(
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )>,
-        NoteDeckError,
-    > {
+    pub fn load_summary_cache(&self, limit: usize) -> Result<Vec<SummaryRow>, NoteDeckError> {
         let conn = self.lock()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let mut stmt = conn.prepare(
-            "SELECT url, title, description, image, site_name FROM ogp_cache WHERE expires_at > ?1 LIMIT ?2",
+            "SELECT url, title, description, image, site_name, icon, player_url, player_width, player_height, player_allow, final_url, sensitive, medias_json
+             FROM ogp_cache WHERE expires_at > ?1 LIMIT ?2",
         )?;
         let rows = stmt
             .query_map(params![now, limit as i64], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
+                let url: String = row.get(0)?;
+                Self::row_to_summary_offset(&url, row, 1)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Map a DB row (without url column) into SummaryRow. Columns start at index 0.
+    fn row_to_summary(url: &str, row: &rusqlite::Row) -> rusqlite::Result<SummaryRow> {
+        Self::row_to_summary_offset(url, row, 0)
+    }
+
+    /// Map a DB row into SummaryRow with column offset (for queries with/without url column).
+    fn row_to_summary_offset(
+        url: &str,
+        row: &rusqlite::Row,
+        off: usize,
+    ) -> rusqlite::Result<SummaryRow> {
+        let sensitive_i: i32 = row.get(off + 10)?;
+        Ok(SummaryRow {
+            url: url.to_string(),
+            title: row.get(off)?,
+            description: row.get(off + 1)?,
+            thumbnail: row.get(off + 2)?,
+            sitename: row.get(off + 3)?,
+            icon: row.get(off + 4)?,
+            player_url: row.get(off + 5)?,
+            player_width: row.get(off + 6)?,
+            player_height: row.get(off + 7)?,
+            player_allow: row.get(off + 8)?,
+            final_url: row.get(off + 9)?,
+            sensitive: sensitive_i != 0,
+            medias_json: row.get(off + 11)?,
+        })
     }
 
     pub fn cleanup_expired_ogp(&self) -> Result<(), NoteDeckError> {

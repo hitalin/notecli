@@ -104,6 +104,14 @@ pub struct StreamChatMessageEvent {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StreamChatMessageDeletedEvent {
+    pub account_id: String,
+    pub subscription_id: String,
+    pub message_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamMainEvent {
     pub account_id: String,
     pub subscription_id: String,
@@ -905,18 +913,33 @@ async fn handle_ws_message(
             });
             emit_or_log!(emitter, "stream-main-event", payload);
         }
-    } else if info.kind == "chat" && event_type == "message" {
-        if let Ok(msg) = serde_json::from_value::<ChatMessage>(event_body) {
-            let payload = StreamChatMessageEvent {
-                account_id: account_id.to_string(),
-                subscription_id: sub_id.to_string(),
-                message: msg,
-            };
-            event_bus.send(SseEvent {
-                event_type: "chat".to_string(),
-                data: serde_json::to_value(&payload).unwrap_or_default(),
-            });
-            emit_or_log!(emitter, "stream-chat-message", payload);
+    } else if info.kind == "chat" {
+        if event_type == "message" {
+            if let Ok(msg) = serde_json::from_value::<ChatMessage>(event_body) {
+                let payload = StreamChatMessageEvent {
+                    account_id: account_id.to_string(),
+                    subscription_id: sub_id.to_string(),
+                    message: msg,
+                };
+                event_bus.send(SseEvent {
+                    event_type: "chat".to_string(),
+                    data: serde_json::to_value(&payload).unwrap_or_default(),
+                });
+                emit_or_log!(emitter, "stream-chat-message", payload);
+            }
+        } else if event_type == "deleted" {
+            if let Some(id) = event_body.as_str() {
+                let payload = StreamChatMessageDeletedEvent {
+                    account_id: account_id.to_string(),
+                    subscription_id: sub_id.to_string(),
+                    message_id: id.to_string(),
+                };
+                event_bus.send(SseEvent {
+                    event_type: "chat-deleted".to_string(),
+                    data: serde_json::to_value(&payload).unwrap_or_default(),
+                });
+                emit_or_log!(emitter, "stream-chat-message-deleted", payload);
+            }
         }
     }
 }
