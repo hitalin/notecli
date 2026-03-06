@@ -279,6 +279,16 @@ pub struct CreateNoteParams {
     pub reply_id: Option<String>,
     pub renote_id: Option<String>,
     pub file_ids: Option<Vec<String>>,
+    pub poll: Option<CreateNotePoll>,
+    pub scheduled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateNotePoll {
+    pub choices: Vec<String>,
+    pub multiple: Option<bool>,
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

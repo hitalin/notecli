@@ -423,6 +423,12 @@ impl MisskeyClient {
         if let Some(ref ids) = params.file_ids {
             body["fileIds"] = json!(ids);
         }
+        if let Some(ref poll) = params.poll {
+            body["poll"] = json!(poll);
+        }
+        if let Some(ref scheduled_at) = params.scheduled_at {
+            body["scheduledAt"] = json!(scheduled_at);
+        }
 
         let data = self.request(host, token, "notes/create", body).await?;
         let raw: RawCreateNoteResponse =

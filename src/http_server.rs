@@ -264,6 +264,8 @@ async fn create_note(
         reply_id: body.reply_id,
         renote_id: body.renote_id,
         file_ids: body.file_ids,
+        poll: None,
+        scheduled_at: None,
     };
     let note = state
         .client

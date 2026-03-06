@@ -182,6 +182,8 @@ async fn run_cli(
                 reply_id: reply_to.clone(),
                 renote_id: None,
                 file_ids: None,
+                poll: None,
+                scheduled_at: None,
             };
             let note = client
                 .create_note(&host, &token, &account.id, params)
@@ -281,6 +283,8 @@ async fn run_cli(
                 reply_id: None,
                 renote_id: None,
                 file_ids: None,
+                poll: None,
+                scheduled_at: None,
             };
             client.update_note(&host, &token, &id, params).await?;
             match fmt {
@@ -326,6 +330,8 @@ async fn run_cli(
                 reply_id: None,
                 renote_id: Some(note_id.clone()),
                 file_ids: None,
+                poll: None,
+                scheduled_at: None,
             };
             let note = client
                 .create_note(&host, &token, &account.id, params)
