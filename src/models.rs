@@ -1,7 +1,16 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use zeroize::Zeroize;
+
+fn deserialize_nullable_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let opt: Option<Vec<T>> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
 
 // --- DB models ---
 
@@ -423,14 +432,14 @@ pub struct ChatMessage {
     pub file_id: Option<String>,
     pub file: Option<NormalizedDriveFile>,
     pub is_read: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_vec")]
     pub reactions: Vec<ChatMessageReaction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageReaction {
-    pub user: ChatReactionUser,
+    pub user: Option<ChatReactionUser>,
     pub reaction: String,
 }
 
