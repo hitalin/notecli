@@ -423,6 +423,25 @@ pub struct ChatMessage {
     pub file_id: Option<String>,
     pub file: Option<NormalizedDriveFile>,
     pub is_read: Option<bool>,
+    #[serde(default)]
+    pub reactions: Vec<ChatMessageReaction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageReaction {
+    pub user: ChatReactionUser,
+    pub reaction: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatReactionUser {
+    pub id: String,
+    pub name: Option<String>,
+    pub username: String,
+    pub host: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
