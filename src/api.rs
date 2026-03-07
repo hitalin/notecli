@@ -244,6 +244,24 @@ impl MisskeyClient {
         Ok(notes)
     }
 
+    pub async fn get_featured_notes(
+        &self,
+        host: &str,
+        token: &str,
+        account_id: &str,
+        limit: i64,
+    ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
+        let params = json!({ "limit": limit });
+        let data = self
+            .request(host, token, "notes/featured", params)
+            .await?;
+        let raw: Vec<RawNote> = serde_json::from_value(data)?;
+        Ok(raw
+            .into_iter()
+            .map(|n| n.normalize(account_id, host))
+            .collect())
+    }
+
     pub async fn get_clips(
         &self,
         host: &str,
