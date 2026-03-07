@@ -27,7 +27,7 @@ impl MisskeyClient {
     pub fn new() -> Result<Self, NoteDeckError> {
         Ok(Self {
             client: Client::builder()
-                .user_agent(concat!("NoteDeck/", env!("CARGO_PKG_VERSION")))
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
                 .timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(10))
                 .pool_max_idle_per_host(4)
