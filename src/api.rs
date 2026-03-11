@@ -657,66 +657,29 @@ impl MisskeyClient {
         host: &str,
         token: &str,
     ) -> Result<Vec<String>, NoteDeckError> {
-        // 1. Legacy Pizzax store: scope ['client', 'base'], key 'reactions'
-        match self.registry_get_string_array(host, token, &["client", "base"], "reactions").await {
-            Some(reactions) if !reactions.is_empty() => {
-                eprintln!("[pinnedReactions] found legacy reactions: {:?}", reactions);
-                return Ok(reactions);
-            }
-            Some(_) => eprintln!("[pinnedReactions] legacy key exists but empty"),
-            None => eprintln!("[pinnedReactions] legacy key not found"),
-        }
-
-        // 2. New preferences: scope ['client', 'preferences', 'sync'], key 'default:emojiPalettes'
-        //    Format: [[scope, value], ...] where value is [{id, name, emojis}, ...]
-        match self.request(
+        // New Misskey preferences: scope ['client', 'preferences', 'sync'], key 'default:emojiPalettes'
+        // Format: [[scope, palettes], ...] where palettes is [{id, name, emojis}, ...]
+        if let Ok(data) = self.request(
             host, token, "i/registry/get",
             json!({ "scope": ["client", "preferences", "sync"], "key": "default:emojiPalettes" }),
         ).await {
-            Ok(data) => {
-                eprintln!("[pinnedReactions] new preferences raw data: {}", data);
-                if let Some(emojis) = Self::extract_reaction_palette(&data) {
-                    if !emojis.is_empty() {
-                        eprintln!("[pinnedReactions] extracted emojis: {:?}", emojis);
-                        return Ok(emojis);
-                    }
+            if let Some(emojis) = Self::extract_reaction_palette(&data) {
+                if !emojis.is_empty() {
+                    return Ok(emojis);
                 }
-                eprintln!("[pinnedReactions] failed to extract from new preferences");
             }
-            Err(e) => eprintln!("[pinnedReactions] new preferences key not found: {}", e),
         }
 
-        eprintln!("[pinnedReactions] no custom reactions found, returning empty");
         Ok(vec![])
     }
 
-    /// Get a string array from the registry, returning None on any error.
-    async fn registry_get_string_array(
-        &self,
-        host: &str,
-        token: &str,
-        scope: &[&str],
-        key: &str,
-    ) -> Option<Vec<String>> {
-        let data = self.request(
-            host, token, "i/registry/get",
-            json!({ "scope": scope, "key": key }),
-        ).await.ok()?;
-        serde_json::from_value::<Vec<String>>(data).ok()
-    }
-
-    /// Extract emojis from the new preferences emojiPalettes format.
-    /// Data is [[scope, palettes], ...] where palettes is [{id, name, emojis}, ...]
-    /// We also check emojiPaletteForReaction to pick the right palette.
     fn extract_reaction_palette(data: &Value) -> Option<Vec<String>> {
         let entries = data.as_array()?;
-        // Pick the first entry's palettes (global scope)
         let (_, palettes_val) = entries.first().and_then(|e| {
             let arr = e.as_array()?;
             Some((arr.first()?, arr.get(1)?))
         })?;
         let palettes = palettes_val.as_array()?;
-        // Use the first palette's emojis
         let first = palettes.first()?;
         let emojis = first.get("emojis")?.as_array()?;
         Some(emojis.iter().filter_map(|v| v.as_str().map(String::from)).collect())
