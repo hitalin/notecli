@@ -225,6 +225,8 @@ pub struct NormalizedUserDetail {
     pub birthday: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub online_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -683,6 +685,7 @@ pub struct RawUserDetail {
     pub url: Option<String>,
     pub birthday: Option<String>,
     pub location: Option<String>,
+    pub online_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -732,14 +735,6 @@ impl From<RawEmoji> for ServerEmoji {
             aliases: raw.aliases,
         }
     }
-}
-
-/// Response shape for extracting pinned reactions from /api/i.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RawUserReactions {
-    #[serde(default)]
-    pub reactions: Vec<String>,
 }
 
 // --- Conversion: Raw -> Normalized ---
@@ -906,6 +901,7 @@ impl RawUserDetail {
             url: self.url,
             birthday: self.birthday,
             location: self.location,
+            online_status: self.online_status,
         }
     }
 }

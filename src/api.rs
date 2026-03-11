@@ -12,7 +12,7 @@ use crate::models::{
     NormalizedNoteReaction, NormalizedNotification, NormalizedUser, NormalizedUserDetail,
     RawCreateNoteResponse, RawDriveFile, RawEmojisResponse, RawMiAuthResponse, RawNote,
     RawNoteReaction, RawNotification, Antenna, Channel, Clip, RawUser, RawUserDetail,
-    RawUserReactions, SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
+    SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
 };
 
 
@@ -657,9 +657,31 @@ impl MisskeyClient {
         host: &str,
         token: &str,
     ) -> Result<Vec<String>, NoteDeckError> {
-        let data = self.request(host, token, "i", json!({})).await?;
-        let raw: RawUserReactions = serde_json::from_value(data)?;
-        Ok(raw.reactions)
+        // Try Misskey Web client's registry (scope: ['client', 'base'], key: 'reactions')
+        let result = self
+            .request(
+                host,
+                token,
+                "i/registry/get",
+                json!({
+                    "scope": ["client", "base"],
+                    "key": "reactions",
+                }),
+            )
+            .await;
+
+        match result {
+            Ok(data) => {
+                if let Ok(reactions) = serde_json::from_value::<Vec<String>>(data) {
+                    if !reactions.is_empty() {
+                        return Ok(reactions);
+                    }
+                }
+                Ok(vec![])
+            }
+            // Registry key not found or API not supported — return empty
+            Err(_) => Ok(vec![]),
+        }
     }
 
     pub async fn get_user_notes(
