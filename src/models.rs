@@ -115,6 +115,8 @@ pub struct NormalizedNote {
     #[serde(default)]
     pub local_only: bool,
     #[serde(default)]
+    pub visible_user_ids: Vec<String>,
+    #[serde(default)]
     pub is_favorited: bool,
     /// Fork-specific mode flags (e.g., isNoteInYamiMode)
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -559,6 +561,8 @@ pub struct RawNote {
     #[serde(default)]
     pub local_only: bool,
     #[serde(default)]
+    pub visible_user_ids: Vec<String>,
+    #[serde(default)]
     pub is_favorited: bool,
     pub reply: Option<Box<RawNote>>,
     pub renote: Option<Box<RawNote>>,
@@ -778,6 +782,7 @@ impl RawNote {
             url: self.url,
             updated_at: self.updated_at,
             local_only: self.local_only,
+            visible_user_ids: self.visible_user_ids,
             is_favorited: self.is_favorited,
             mode_flags: self
                 .extra
