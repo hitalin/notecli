@@ -39,6 +39,10 @@ fn output_format(cli: &Cli) -> OutputFormat {
 
 #[tokio::main]
 async fn main() {
+    if let Err(e) = notecli::keychain::init_store() {
+        eprintln!("Warning: keychain unavailable ({})", e);
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
