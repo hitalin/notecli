@@ -5,6 +5,11 @@ use std::sync::{Mutex, MutexGuard};
 use crate::error::NoteDeckError;
 use crate::models::{Account, NormalizedNote, StoredServer};
 
+mod embedded {
+    use refinery::embed_migrations;
+    embed_migrations!("migrations");
+}
+
 /// A row from the ogp_cache table, mapped to structured fields.
 #[derive(Debug, Clone)]
 pub struct SummaryRow {
@@ -29,12 +34,23 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self, NoteDeckError> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+
+        // Run numbered migrations (V1, V2, ...)
+        embedded::migrations::runner().run(&mut conn).map_err(|e| {
+            NoteDeckError::Database(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(format!("Migration failed: {e}")),
+            ))
+        })?;
+
+        // One-time FTS rebuild for existing databases upgraded before FTS5 was added
+        Self::rebuild_fts_if_needed(&conn)?;
+
         let db = Self {
             conn: Mutex::new(conn),
         };
-        db.migrate()?;
         db.cleanup_cache()?;
         Ok(db)
     }
@@ -48,58 +64,8 @@ impl Database {
         })
     }
 
-    fn migrate(&self) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS accounts (
-                id TEXT PRIMARY KEY,
-                host TEXT NOT NULL,
-                token TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                username TEXT NOT NULL,
-                display_name TEXT,
-                avatar_url TEXT,
-                software TEXT NOT NULL,
-                UNIQUE(host, user_id)
-            );
-            CREATE TABLE IF NOT EXISTS servers (
-                host TEXT PRIMARY KEY,
-                software TEXT NOT NULL,
-                version TEXT NOT NULL,
-                features_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS notes_cache (
-                note_id TEXT NOT NULL,
-                account_id TEXT NOT NULL,
-                server_host TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                text TEXT,
-                note_json TEXT NOT NULL,
-                cached_at INTEGER NOT NULL,
-                PRIMARY KEY (note_id, account_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_notes_cache_timeline
-                ON notes_cache (account_id, created_at DESC);
-
-            -- FTS5 trigram index for fast substring search (CJK-friendly)
-            CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
-                text,
-                content='notes_cache',
-                content_rowid=rowid,
-                tokenize='trigram'
-            );
-            CREATE TRIGGER IF NOT EXISTS notes_fts_ai
-                AFTER INSERT ON notes_cache WHEN new.text IS NOT NULL BEGIN
-                INSERT INTO notes_fts(rowid, text) VALUES (new.rowid, new.text);
-            END;
-            CREATE TRIGGER IF NOT EXISTS notes_fts_ad
-                AFTER DELETE ON notes_cache WHEN old.text IS NOT NULL BEGIN
-                INSERT INTO notes_fts(notes_fts, rowid, text) VALUES('delete', old.rowid, old.text);
-            END;",
-        )?;
-
-        // Populate FTS from existing data (upgrade path: one-time rebuild)
+    /// Populate FTS index from existing data if empty (one-time upgrade path).
+    fn rebuild_fts_if_needed(conn: &Connection) -> Result<(), NoteDeckError> {
         let needs_rebuild: bool = conn.query_row(
             "SELECT (SELECT COUNT(*) FROM notes_fts) = 0
                 AND (SELECT COUNT(*) FROM notes_cache WHERE text IS NOT NULL) > 0",
@@ -109,64 +75,6 @@ impl Database {
         if needs_rebuild {
             conn.execute_batch("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')")?;
         }
-
-        // Drop legacy index superseded by FTS5
-        conn.execute_batch("DROP INDEX IF EXISTS idx_notes_cache_text")?;
-
-        // OGP cache table
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS ogp_cache (
-                url TEXT PRIMARY KEY,
-                title TEXT,
-                description TEXT,
-                image TEXT,
-                site_name TEXT,
-                expires_at INTEGER NOT NULL
-            );",
-        )?;
-
-        // Add summaly-compatible columns to ogp_cache
-        let has_icon_col: bool = conn
-            .prepare("SELECT COUNT(*) FROM pragma_table_info('ogp_cache') WHERE name='icon'")?
-            .query_row([], |row| row.get(0))?;
-        if !has_icon_col {
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN icon TEXT", [])?;
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_url TEXT", [])?;
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_width INTEGER", [])?;
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_height INTEGER", [])?;
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_allow TEXT", [])?;
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN final_url TEXT", [])?;
-            conn.execute(
-                "ALTER TABLE ogp_cache ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN medias_json TEXT", [])?;
-        }
-
-        // Add player_allow column (for existing DBs that already have icon but not player_allow)
-        let has_player_allow: bool = conn
-            .prepare(
-                "SELECT COUNT(*) FROM pragma_table_info('ogp_cache') WHERE name='player_allow'",
-            )?
-            .query_row([], |row| row.get(0))?;
-        if !has_player_allow {
-            conn.execute("ALTER TABLE ogp_cache ADD COLUMN player_allow TEXT", [])?;
-        }
-
-        // Add timeline_type column for per-timeline cache isolation
-        let has_tl_col: bool = conn
-            .prepare(
-                "SELECT COUNT(*) FROM pragma_table_info('notes_cache') WHERE name='timeline_type'",
-            )?
-            .query_row([], |row| row.get(0))?;
-        if !has_tl_col {
-            conn.execute_batch(
-                "ALTER TABLE notes_cache ADD COLUMN timeline_type TEXT NOT NULL DEFAULT '';
-                 CREATE INDEX IF NOT EXISTS idx_notes_cache_tl
-                     ON notes_cache (account_id, timeline_type, created_at DESC);",
-            )?;
-        }
-
         Ok(())
     }
 
@@ -666,5 +574,365 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Account, NormalizedNote, NormalizedUser, StoredServer};
+    use std::collections::HashMap;
+
+    fn temp_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+        (dir, db)
+    }
+
+    // --- Migration tests ---
+
+    #[test]
+    fn migration_creates_all_tables() {
+        let (_dir, db) = temp_db();
+        let conn = db.lock().unwrap();
+
+        // Verify all expected tables exist
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(tables.contains(&"accounts".to_string()));
+        assert!(tables.contains(&"servers".to_string()));
+        assert!(tables.contains(&"notes_cache".to_string()));
+        assert!(tables.contains(&"ogp_cache".to_string()));
+        assert!(tables.contains(&"refinery_schema_history".to_string()));
+    }
+
+    #[test]
+    fn migration_creates_fts5_virtual_table() {
+        let (_dir, db) = temp_db();
+        let conn = db.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='notes_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // First open
+        let db = Database::open(&db_path).unwrap();
+        drop(db);
+
+        // Second open: migrations re-run without error
+        let db = Database::open(&db_path).unwrap();
+        assert!(db.load_accounts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migration_tracks_schema_version() {
+        let (_dir, db) = temp_db();
+        let conn = db.lock().unwrap();
+        let version: i32 = conn
+            .query_row(
+                "SELECT MAX(version) FROM refinery_schema_history",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(version >= 1);
+    }
+
+    #[test]
+    fn ogp_cache_has_summaly_columns() {
+        let (_dir, db) = temp_db();
+        let conn = db.lock().unwrap();
+        let columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('ogp_cache')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        for expected in &[
+            "icon",
+            "player_url",
+            "player_width",
+            "player_height",
+            "player_allow",
+            "final_url",
+            "sensitive",
+            "medias_json",
+        ] {
+            assert!(
+                columns.contains(&expected.to_string()),
+                "Missing column: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn notes_cache_has_timeline_type_column() {
+        let (_dir, db) = temp_db();
+        let conn = db.lock().unwrap();
+        let has: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('notes_cache') WHERE name='timeline_type'",
+            )
+            .unwrap()
+            .query_row([], |row| row.get(0))
+            .unwrap();
+        assert!(has);
+    }
+
+    // --- Account CRUD tests ---
+
+    fn sample_account() -> Account {
+        Account {
+            id: "acc-1".to_string(),
+            host: "misskey.io".to_string(),
+            token: "test-token".to_string(),
+            user_id: "user-1".to_string(),
+            username: "alice".to_string(),
+            display_name: Some("Alice".to_string()),
+            avatar_url: None,
+            software: "misskey".to_string(),
+        }
+    }
+
+    #[test]
+    fn account_upsert_and_load() {
+        let (_dir, db) = temp_db();
+        db.upsert_account(&sample_account()).unwrap();
+
+        let accounts = db.load_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].username, "alice");
+        assert_eq!(accounts[0].host, "misskey.io");
+    }
+
+    #[test]
+    fn account_get_by_id() {
+        let (_dir, db) = temp_db();
+        db.upsert_account(&sample_account()).unwrap();
+
+        let acc = db.get_account("acc-1").unwrap().unwrap();
+        assert_eq!(acc.username, "alice");
+
+        assert!(db.get_account("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn account_delete() {
+        let (_dir, db) = temp_db();
+        db.upsert_account(&sample_account()).unwrap();
+        db.delete_account("acc-1").unwrap();
+        assert!(db.load_accounts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn account_clear_token() {
+        let (_dir, db) = temp_db();
+        db.upsert_account(&sample_account()).unwrap();
+        db.clear_token("acc-1").unwrap();
+
+        let acc = db.get_account("acc-1").unwrap().unwrap();
+        assert!(acc.token.is_empty());
+    }
+
+    // --- Server CRUD tests ---
+
+    fn sample_server() -> StoredServer {
+        StoredServer {
+            host: "misskey.io".to_string(),
+            software: "misskey".to_string(),
+            version: "2025.3.0".to_string(),
+            features_json: "{}".to_string(),
+            updated_at: 1700000000,
+        }
+    }
+
+    #[test]
+    fn server_upsert_and_load() {
+        let (_dir, db) = temp_db();
+        db.upsert_server(&sample_server()).unwrap();
+
+        let servers = db.load_servers().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].host, "misskey.io");
+    }
+
+    #[test]
+    fn server_get_by_host() {
+        let (_dir, db) = temp_db();
+        db.upsert_server(&sample_server()).unwrap();
+
+        let s = db.get_server("misskey.io").unwrap().unwrap();
+        assert_eq!(s.version, "2025.3.0");
+
+        assert!(db.get_server("nonexistent").unwrap().is_none());
+    }
+
+    // --- Notes cache tests ---
+
+    fn sample_note(id: &str, text: &str) -> NormalizedNote {
+        NormalizedNote {
+            id: id.to_string(),
+            account_id: "acc-1".to_string(),
+            server_host: "misskey.io".to_string(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            text: Some(text.to_string()),
+            cw: None,
+            user: NormalizedUser {
+                id: "user-1".to_string(),
+                username: "alice".to_string(),
+                host: None,
+                name: None,
+                avatar_url: None,
+                emojis: HashMap::new(),
+                is_bot: false,
+                avatar_decorations: Vec::new(),
+                instance: None,
+            },
+            visibility: "public".to_string(),
+            emojis: HashMap::new(),
+            reaction_emojis: HashMap::new(),
+            reactions: HashMap::new(),
+            my_reaction: None,
+            renote_count: 0,
+            replies_count: 0,
+            files: Vec::new(),
+            poll: None,
+            reply_id: None,
+            renote_id: None,
+            channel_id: None,
+            reaction_acceptance: None,
+            uri: None,
+            url: None,
+            updated_at: None,
+            local_only: false,
+            visible_user_ids: Vec::new(),
+            is_favorited: false,
+            mode_flags: HashMap::new(),
+            reply: None,
+            renote: None,
+        }
+    }
+
+    #[test]
+    fn cache_note_and_retrieve() {
+        let (_dir, db) = temp_db();
+        let note = sample_note("note-1", "Hello world");
+        db.cache_notes(&[note], "home").unwrap();
+
+        let cached = db.get_cached_timeline("acc-1", "home", 10).unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, "note-1");
+    }
+
+    #[test]
+    fn cache_note_delete() {
+        let (_dir, db) = temp_db();
+        db.cache_notes(&[sample_note("note-1", "test")], "home")
+            .unwrap();
+        db.delete_cached_note("note-1").unwrap();
+
+        let cached = db.get_cached_timeline("acc-1", "home", 10).unwrap();
+        assert!(cached.is_empty());
+    }
+
+    #[test]
+    fn fts_search_finds_cached_notes() {
+        let (_dir, db) = temp_db();
+        db.cache_notes(
+            &[
+                sample_note("n1", "Rust programming language"),
+                sample_note("n2", "Python scripting"),
+            ],
+            "home",
+        )
+        .unwrap();
+
+        let results = db.search_cached_notes("acc-1", "Rust", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "n1");
+    }
+
+    #[test]
+    fn cache_date_range() {
+        let (_dir, db) = temp_db();
+        db.cache_notes(&[sample_note("n1", "test")], "home")
+            .unwrap();
+
+        let range = db.get_cache_date_range("acc-1", "home").unwrap();
+        assert!(range.is_some());
+        let (oldest, newest) = range.unwrap();
+        assert_eq!(oldest, newest); // single note
+    }
+
+    // --- OGP cache tests ---
+
+    #[test]
+    fn ogp_cache_store_and_retrieve() {
+        let (_dir, db) = temp_db();
+        let row = SummaryRow {
+            url: "https://example.com".to_string(),
+            title: Some("Example".to_string()),
+            description: Some("A test page".to_string()),
+            thumbnail: None,
+            sitename: None,
+            icon: None,
+            player_url: None,
+            player_width: None,
+            player_height: None,
+            player_allow: None,
+            final_url: None,
+            sensitive: false,
+            medias_json: None,
+        };
+        db.cache_summary("https://example.com", &row, 3600).unwrap();
+
+        let cached = db.get_cached_summary("https://example.com").unwrap();
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().title, Some("Example".to_string()));
+    }
+
+    #[test]
+    fn ogp_cache_expired_returns_none() {
+        let (_dir, db) = temp_db();
+        let row = SummaryRow {
+            url: "https://expired.com".to_string(),
+            title: Some("Old".to_string()),
+            description: None,
+            thumbnail: None,
+            sitename: None,
+            icon: None,
+            player_url: None,
+            player_width: None,
+            player_height: None,
+            player_allow: None,
+            final_url: None,
+            sensitive: false,
+            medias_json: None,
+        };
+        // TTL = 0 means already expired
+        db.cache_summary("https://expired.com", &row, 0).unwrap();
+
+        // Should not return expired entry
+        let cached = db.get_cached_summary("https://expired.com").unwrap();
+        assert!(cached.is_none());
     }
 }
