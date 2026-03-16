@@ -107,3 +107,113 @@ impl serde::Serialize for NoteDeckError {
         s.end()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_code_mapping() {
+        assert_eq!(
+            NoteDeckError::AccountNotFound("x".into()).code(),
+            "ACCOUNT_NOT_FOUND"
+        );
+        assert_eq!(
+            NoteDeckError::Api {
+                endpoint: "test".into(),
+                status: 400,
+                message: "bad".into()
+            }
+            .code(),
+            "API"
+        );
+        assert_eq!(NoteDeckError::Auth("x".into()).code(), "AUTH");
+        assert_eq!(NoteDeckError::WebSocket("x".into()).code(), "WEBSOCKET");
+        assert_eq!(
+            NoteDeckError::NoConnection("x".into()).code(),
+            "NO_CONNECTION"
+        );
+        assert_eq!(NoteDeckError::ConnectionClosed.code(), "CONNECTION_CLOSED");
+        assert_eq!(
+            NoteDeckError::InvalidInput("x".into()).code(),
+            "INVALID_INPUT"
+        );
+        assert_eq!(NoteDeckError::Keychain("x".into()).code(), "KEYCHAIN");
+    }
+
+    #[test]
+    fn safe_message_sanitizes_internals() {
+        // These variants should NOT leak internal details
+        let db_err = NoteDeckError::Database(
+            rusqlite::Connection::open_in_memory()
+                .unwrap()
+                .execute("INVALID SQL", [])
+                .unwrap_err(),
+        );
+        assert_eq!(db_err.safe_message(), "Database operation failed");
+
+        let ws_err = NoteDeckError::WebSocket("tungstenite internal detail".into());
+        assert_eq!(ws_err.safe_message(), "Connection error");
+
+        let kc_err = NoteDeckError::Keychain("keyring internal detail".into());
+        assert_eq!(kc_err.safe_message(), "Credential storage error");
+    }
+
+    #[test]
+    fn safe_message_passes_controlled_messages() {
+        let api_err = NoteDeckError::Api {
+            endpoint: "/api/test".into(),
+            status: 404,
+            message: "Note not found".into(),
+        };
+        assert_eq!(api_err.safe_message(), "Note not found");
+
+        let auth_err = NoteDeckError::Auth("Authentication failed".into());
+        assert_eq!(auth_err.safe_message(), "Authentication failed");
+
+        let not_found = NoteDeckError::AccountNotFound("acc123".into());
+        assert_eq!(not_found.safe_message(), "Account not found: acc123");
+
+        let no_conn = NoteDeckError::NoConnection("acc456".into());
+        assert_eq!(no_conn.safe_message(), "No connection for account: acc456");
+
+        assert_eq!(
+            NoteDeckError::ConnectionClosed.safe_message(),
+            "Connection closed"
+        );
+
+        let invalid = NoteDeckError::InvalidInput("empty text".into());
+        assert_eq!(invalid.safe_message(), "Invalid input: empty text");
+    }
+
+    #[test]
+    fn serialize_to_json() {
+        let err = NoteDeckError::Api {
+            endpoint: "/api/notes/show".into(),
+            status: 404,
+            message: "Note not found".into(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["code"], "API");
+        assert_eq!(json["message"], "Note not found");
+        // endpoint and status should NOT appear in serialized output
+        assert!(json.get("endpoint").is_none());
+        assert!(json.get("status").is_none());
+    }
+
+    #[test]
+    fn display_trait() {
+        let err = NoteDeckError::AccountNotFound("acc1".into());
+        assert_eq!(format!("{err}"), "Account not found: acc1");
+
+        let err = NoteDeckError::ConnectionClosed;
+        assert_eq!(format!("{err}"), "Connection closed");
+
+        let err = NoteDeckError::Api {
+            endpoint: "test".into(),
+            status: 500,
+            message: "Internal error".into(),
+        };
+        assert_eq!(format!("{err}"), "Internal error");
+    }
+}

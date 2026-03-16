@@ -925,3 +925,537 @@ impl RawNotification {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- TimelineType ----
+
+    #[test]
+    fn timeline_type_api_endpoint_known() {
+        assert_eq!(TimelineType::new("home").api_endpoint(), "notes/timeline");
+        assert_eq!(
+            TimelineType::new("local").api_endpoint(),
+            "notes/local-timeline"
+        );
+        assert_eq!(
+            TimelineType::new("social").api_endpoint(),
+            "notes/hybrid-timeline"
+        );
+        assert_eq!(
+            TimelineType::new("global").api_endpoint(),
+            "notes/global-timeline"
+        );
+    }
+
+    #[test]
+    fn timeline_type_api_endpoint_unknown_fallback() {
+        assert_eq!(
+            TimelineType::new("bubble").api_endpoint(),
+            "notes/bubble-timeline"
+        );
+    }
+
+    #[test]
+    fn timeline_type_ws_channel_known() {
+        assert_eq!(TimelineType::new("home").ws_channel(), "homeTimeline");
+        assert_eq!(TimelineType::new("local").ws_channel(), "localTimeline");
+        assert_eq!(TimelineType::new("social").ws_channel(), "hybridTimeline");
+        assert_eq!(TimelineType::new("global").ws_channel(), "globalTimeline");
+    }
+
+    #[test]
+    fn timeline_type_ws_channel_unknown_fallback() {
+        assert_eq!(TimelineType::new("bubble").ws_channel(), "bubbleTimeline");
+    }
+
+    #[test]
+    fn timeline_type_as_str() {
+        let tt = TimelineType::new("home");
+        assert_eq!(tt.as_str(), "home");
+    }
+
+    #[test]
+    fn timeline_type_serde_roundtrip() {
+        let tt = TimelineType::new("local");
+        let json = serde_json::to_string(&tt).unwrap();
+        assert_eq!(json, "\"local\"");
+        let back: TimelineType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.as_str(), "local");
+    }
+
+    // ---- TimelineOptions ----
+
+    #[test]
+    fn timeline_options_limit_clamp() {
+        assert_eq!(TimelineOptions::new(0, None, None).limit(), 1);
+        assert_eq!(TimelineOptions::new(-5, None, None).limit(), 1);
+        assert_eq!(TimelineOptions::new(50, None, None).limit(), 50);
+        assert_eq!(TimelineOptions::new(200, None, None).limit(), 100);
+    }
+
+    #[test]
+    fn timeline_options_default() {
+        let opts = TimelineOptions::default();
+        assert_eq!(opts.limit(), 20);
+        assert!(opts.since_id.is_none());
+        assert!(opts.until_id.is_none());
+        assert!(opts.filters.is_none());
+        assert!(opts.list_id.is_none());
+    }
+
+    #[test]
+    fn timeline_options_deserialize_missing_limit_uses_default() {
+        let json = r#"{}"#;
+        let opts: TimelineOptions = serde_json::from_str(json).unwrap();
+        assert_eq!(opts.limit(), 20);
+    }
+
+    // ---- SearchOptions ----
+
+    #[test]
+    fn search_options_limit_clamp() {
+        assert_eq!(SearchOptions::new(0).limit(), 1);
+        assert_eq!(SearchOptions::new(-1).limit(), 1);
+        assert_eq!(SearchOptions::new(50).limit(), 50);
+        assert_eq!(SearchOptions::new(999).limit(), 100);
+    }
+
+    #[test]
+    fn search_options_default() {
+        let opts = SearchOptions::default();
+        assert_eq!(opts.limit(), 20);
+    }
+
+    // ---- AccountPublic from Account ----
+
+    #[test]
+    fn account_public_strips_token() {
+        let account = Account {
+            id: "acc1".into(),
+            host: "misskey.io".into(),
+            token: "secret-token".into(),
+            user_id: "uid1".into(),
+            username: "taka".into(),
+            display_name: Some("Taka".into()),
+            avatar_url: Some("https://example.com/avatar.png".into()),
+            software: "misskey".into(),
+        };
+        let public = AccountPublic::from(&account);
+        assert_eq!(public.id, "acc1");
+        assert_eq!(public.host, "misskey.io");
+        assert_eq!(public.username, "taka");
+        // AccountPublic has no token field
+        let json = serde_json::to_value(&public).unwrap();
+        assert!(json.get("token").is_none());
+    }
+
+    // ---- Raw -> Normalized conversions ----
+
+    fn raw_user_json() -> Value {
+        json!({
+            "id": "u1",
+            "username": "testuser",
+            "host": null,
+            "name": "Test User",
+            "avatarUrl": "https://example.com/avatar.png",
+            "isBot": false,
+            "avatarDecorations": [],
+            "emojis": {},
+            "instance": null
+        })
+    }
+
+    fn raw_note_json() -> Value {
+        json!({
+            "id": "n1",
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "text": "Hello, world!",
+            "cw": null,
+            "user": raw_user_json(),
+            "visibility": "public",
+            "emojis": {"smile": "https://example.com/smile.png"},
+            "reactionEmojis": {},
+            "reactions": {":star:": 3},
+            "myReaction": null,
+            "renoteCount": 1,
+            "repliesCount": 2,
+            "files": [],
+            "poll": null,
+            "replyId": null,
+            "renoteId": null,
+            "channelId": null,
+            "reactionAcceptance": null,
+            "uri": null,
+            "url": null,
+            "updatedAt": null,
+            "localOnly": false,
+            "visibleUserIds": [],
+            "isFavorited": false,
+            "reply": null,
+            "renote": null
+        })
+    }
+
+    #[test]
+    fn raw_note_normalize_basic() {
+        let raw: RawNote = serde_json::from_value(raw_note_json()).unwrap();
+        let note = raw.normalize("acc1", "misskey.io");
+        assert_eq!(note.id, "n1");
+        assert_eq!(note.account_id, "acc1");
+        assert_eq!(note.server_host, "misskey.io");
+        assert_eq!(note.text.as_deref(), Some("Hello, world!"));
+        assert_eq!(note.visibility, "public");
+        assert_eq!(note.user.username, "testuser");
+        assert_eq!(note.renote_count, 1);
+        assert_eq!(note.replies_count, 2);
+        assert_eq!(*note.reactions.get(":star:").unwrap(), 3);
+        assert_eq!(
+            *note.emojis.get("smile").unwrap(),
+            "https://example.com/smile.png"
+        );
+    }
+
+    #[test]
+    fn raw_note_normalize_with_poll() {
+        let mut j = raw_note_json();
+        j["poll"] = json!({
+            "choices": [
+                {"text": "Rust", "votes": 10, "isVoted": true},
+                {"text": "Go", "votes": 5, "isVoted": false}
+            ],
+            "multiple": false,
+            "expiresAt": "2025-12-31T00:00:00.000Z"
+        });
+        let raw: RawNote = serde_json::from_value(j).unwrap();
+        let note = raw.normalize("acc1", "misskey.io");
+        let poll = note.poll.unwrap();
+        assert_eq!(poll.choices.len(), 2);
+        assert_eq!(poll.choices[0].text, "Rust");
+        assert_eq!(poll.choices[0].votes, 10);
+        assert!(poll.choices[0].is_voted);
+        assert!(!poll.multiple);
+    }
+
+    #[test]
+    fn raw_note_normalize_with_files() {
+        let mut j = raw_note_json();
+        j["files"] = json!([{
+            "id": "f1",
+            "name": "photo.jpg",
+            "type": "image/jpeg",
+            "url": "https://example.com/photo.jpg",
+            "thumbnailUrl": "https://example.com/photo_thumb.jpg",
+            "size": 12345,
+            "isSensitive": true
+        }]);
+        let raw: RawNote = serde_json::from_value(j).unwrap();
+        let note = raw.normalize("acc1", "misskey.io");
+        assert_eq!(note.files.len(), 1);
+        assert_eq!(note.files[0].id, "f1");
+        assert_eq!(note.files[0].file_type, "image/jpeg");
+        assert!(note.files[0].is_sensitive);
+        assert_eq!(note.files[0].size, 12345);
+    }
+
+    #[test]
+    fn raw_note_normalize_nested_renote() {
+        let mut j = raw_note_json();
+        j["renoteId"] = json!("n2");
+        j["renote"] = raw_note_json();
+        j["renote"]["id"] = json!("n2");
+        j["renote"]["text"] = json!("Original note");
+        let raw: RawNote = serde_json::from_value(j).unwrap();
+        let note = raw.normalize("acc1", "misskey.io");
+        assert_eq!(note.renote_id.as_deref(), Some("n2"));
+        let renote = note.renote.unwrap();
+        assert_eq!(renote.id, "n2");
+        assert_eq!(renote.text.as_deref(), Some("Original note"));
+        assert_eq!(renote.account_id, "acc1");
+    }
+
+    #[test]
+    fn raw_note_normalize_mode_flags() {
+        let mut j = raw_note_json();
+        j["isNoteInYamiMode"] = json!(true);
+        j["isNoteInSuperMode"] = json!(false);
+        j["unrelatedField"] = json!("ignored");
+        let raw: RawNote = serde_json::from_value(j).unwrap();
+        let note = raw.normalize("acc1", "misskey.io");
+        assert_eq!(*note.mode_flags.get("isNoteInYamiMode").unwrap(), true);
+        assert_eq!(*note.mode_flags.get("isNoteInSuperMode").unwrap(), false);
+        assert!(!note.mode_flags.contains_key("unrelatedField"));
+    }
+
+    #[test]
+    fn raw_note_normalize_mode_flags_non_bool_ignored() {
+        let mut j = raw_note_json();
+        j["isNoteInStringMode"] = json!("not a bool");
+        let raw: RawNote = serde_json::from_value(j).unwrap();
+        let note = raw.normalize("acc1", "misskey.io");
+        assert!(!note.mode_flags.contains_key("isNoteInStringMode"));
+    }
+
+    #[test]
+    fn raw_user_to_normalized() {
+        let raw: RawUser = serde_json::from_value(raw_user_json()).unwrap();
+        let user: NormalizedUser = raw.into();
+        assert_eq!(user.id, "u1");
+        assert_eq!(user.username, "testuser");
+        assert!(user.host.is_none());
+        assert_eq!(user.name.as_deref(), Some("Test User"));
+        assert!(!user.is_bot);
+    }
+
+    #[test]
+    fn raw_user_detail_normalize() {
+        let j = json!({
+            "id": "u1",
+            "username": "testuser",
+            "host": "remote.example.com",
+            "name": "Test User",
+            "avatarUrl": null,
+            "bannerUrl": "https://example.com/banner.png",
+            "description": "Hello!",
+            "followersCount": 100,
+            "followingCount": 50,
+            "notesCount": 200,
+            "isBot": true,
+            "isCat": true,
+            "isFollowing": true,
+            "isFollowed": false,
+            "createdAt": "2024-01-01T00:00:00.000Z",
+            "avatarDecorations": [],
+            "emojis": {},
+            "roles": [{"id": "r1", "name": "Admin", "color": "#ff0000", "iconUrl": null, "description": "Administrator", "displayOrder": 1}],
+            "fields": [{"name": "Website", "value": "https://example.com"}],
+            "url": "https://remote.example.com/@testuser",
+            "birthday": "2000-01-01",
+            "location": "Tokyo",
+            "onlineStatus": "online"
+        });
+        let raw: RawUserDetail = serde_json::from_value(j).unwrap();
+        let detail = raw.normalize();
+        assert_eq!(detail.id, "u1");
+        assert_eq!(detail.host.as_deref(), Some("remote.example.com"));
+        assert!(detail.is_bot);
+        assert!(detail.is_cat);
+        assert!(detail.is_following);
+        assert_eq!(detail.followers_count, 100);
+        assert_eq!(detail.notes_count, 200);
+        assert_eq!(detail.roles.len(), 1);
+        assert_eq!(detail.roles[0].name, "Admin");
+        assert_eq!(detail.fields.len(), 1);
+        assert_eq!(detail.fields[0].name, "Website");
+        assert_eq!(detail.birthday.as_deref(), Some("2000-01-01"));
+    }
+
+    #[test]
+    fn raw_notification_normalize() {
+        let j = json!({
+            "id": "notif1",
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "type": "reaction",
+            "user": raw_user_json(),
+            "note": raw_note_json(),
+            "reaction": ":star:"
+        });
+        let raw: RawNotification = serde_json::from_value(j).unwrap();
+        let notif = raw.normalize("acc1", "misskey.io");
+        assert_eq!(notif.id, "notif1");
+        assert_eq!(notif.account_id, "acc1");
+        assert_eq!(notif.notification_type, "reaction");
+        assert!(notif.user.is_some());
+        assert!(notif.note.is_some());
+        assert_eq!(notif.reaction.as_deref(), Some(":star:"));
+    }
+
+    #[test]
+    fn raw_notification_normalize_without_user_or_note() {
+        let j = json!({
+            "id": "notif2",
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "type": "followRequestAccepted",
+            "user": null,
+            "note": null,
+            "reaction": null
+        });
+        let raw: RawNotification = serde_json::from_value(j).unwrap();
+        let notif = raw.normalize("acc1", "misskey.io");
+        assert!(notif.user.is_none());
+        assert!(notif.note.is_none());
+        assert!(notif.reaction.is_none());
+    }
+
+    #[test]
+    fn raw_emoji_to_server_emoji() {
+        let raw = RawEmoji {
+            name: "blobcat".into(),
+            url: "https://example.com/blobcat.png".into(),
+            category: Some("blob".into()),
+            aliases: vec!["cat".into(), "neko".into()],
+        };
+        let emoji: ServerEmoji = raw.into();
+        assert_eq!(emoji.name, "blobcat");
+        assert_eq!(emoji.category.as_deref(), Some("blob"));
+        assert_eq!(emoji.aliases, vec!["cat", "neko"]);
+    }
+
+    #[test]
+    fn raw_drive_file_to_normalized() {
+        let raw = RawDriveFile {
+            id: "f1".into(),
+            name: "test.png".into(),
+            file_type: "image/png".into(),
+            url: "https://example.com/test.png".into(),
+            thumbnail_url: None,
+            size: 0,
+            is_sensitive: false,
+        };
+        let file: NormalizedDriveFile = raw.into();
+        assert_eq!(file.id, "f1");
+        assert_eq!(file.file_type, "image/png");
+        assert!(file.thumbnail_url.is_none());
+    }
+
+    #[test]
+    fn raw_note_reaction_to_normalized() {
+        let j = json!({
+            "id": "r1",
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "user": raw_user_json(),
+            "type": ":star:"
+        });
+        let raw: RawNoteReaction = serde_json::from_value(j).unwrap();
+        let reaction: NormalizedNoteReaction = raw.into();
+        assert_eq!(reaction.id, "r1");
+        assert_eq!(reaction.reaction_type, ":star:");
+        assert_eq!(reaction.user.username, "testuser");
+    }
+
+    // ---- Deserialization edge cases ----
+
+    #[test]
+    fn deserialize_note_with_minimal_fields() {
+        let j = json!({
+            "id": "n1",
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "text": null,
+            "cw": null,
+            "user": {"id": "u1", "username": "a"},
+            "poll": null,
+            "replyId": null,
+            "renoteId": null,
+            "channelId": null,
+            "reactionAcceptance": null,
+            "uri": null,
+            "url": null,
+            "updatedAt": null,
+            "reply": null,
+            "renote": null,
+            "myReaction": null
+        });
+        let raw: RawNote = serde_json::from_value(j).unwrap();
+        assert_eq!(raw.visibility, "");
+        assert!(raw.files.is_empty());
+        assert!(raw.reactions.is_empty());
+        assert_eq!(raw.renote_count, 0);
+    }
+
+    #[test]
+    fn chat_message_with_null_reactions() {
+        let j = json!({
+            "id": "cm1",
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "fromUserId": "u1",
+            "fromUser": null,
+            "toUserId": null,
+            "toUser": null,
+            "toRoomId": null,
+            "toRoom": null,
+            "text": "Hello",
+            "fileId": null,
+            "file": null,
+            "isRead": null,
+            "reactions": null
+        });
+        let msg: ChatMessage = serde_json::from_value(j).unwrap();
+        assert!(msg.reactions.is_empty());
+        assert_eq!(msg.text.as_deref(), Some("Hello"));
+    }
+
+    #[test]
+    fn chat_message_with_reactions() {
+        let j = json!({
+            "id": "cm1",
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "fromUserId": "u1",
+            "fromUser": null,
+            "toUserId": null,
+            "toUser": null,
+            "toRoomId": null,
+            "toRoom": null,
+            "text": null,
+            "fileId": null,
+            "file": null,
+            "isRead": true,
+            "reactions": [{"user": null, "reaction": ":star:"}]
+        });
+        let msg: ChatMessage = serde_json::from_value(j).unwrap();
+        assert_eq!(msg.reactions.len(), 1);
+        assert_eq!(msg.reactions[0].reaction, ":star:");
+    }
+
+    #[test]
+    fn normalized_note_serde_roundtrip() {
+        let raw: RawNote = serde_json::from_value(raw_note_json()).unwrap();
+        let note = raw.normalize("acc1", "misskey.io");
+        let json = serde_json::to_string(&note).unwrap();
+        let back: NormalizedNote = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, note.id);
+        assert_eq!(back.account_id, note.account_id);
+        assert_eq!(back.server_host, note.server_host);
+    }
+
+    #[test]
+    fn create_note_params_serialize() {
+        let params = CreateNoteParams {
+            text: Some("test".into()),
+            cw: None,
+            visibility: Some("public".into()),
+            local_only: Some(true),
+            mode_flags: None,
+            reply_id: None,
+            renote_id: None,
+            file_ids: None,
+            poll: Some(CreateNotePoll {
+                choices: vec!["A".into(), "B".into()],
+                multiple: Some(false),
+                expires_at: None,
+            }),
+            scheduled_at: None,
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["text"], "test");
+        assert_eq!(json["visibility"], "public");
+        assert_eq!(json["localOnly"], true);
+        assert_eq!(json["poll"]["choices"], json!(["A", "B"]));
+    }
+
+    #[test]
+    fn stored_server_serde_roundtrip() {
+        let server = StoredServer {
+            host: "misskey.io".into(),
+            software: "misskey".into(),
+            version: "2024.1.0".into(),
+            features_json: r#"{"miAuth":true}"#.into(),
+            updated_at: 1700000000,
+        };
+        let json = serde_json::to_string(&server).unwrap();
+        let back: StoredServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host, "misskey.io");
+        assert_eq!(back.version, "2024.1.0");
+    }
+}

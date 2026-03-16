@@ -389,3 +389,213 @@ pub enum Commands {
     )]
     Emojis,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parse_post_command() {
+        let cli = Cli::parse_from(["notecli", "post", "Hello, world!"]);
+        match cli.command.unwrap() {
+            Commands::Post {
+                text, visibility, ..
+            } => {
+                assert_eq!(text, "Hello, world!");
+                assert_eq!(visibility, "public");
+            }
+            _ => panic!("Expected Post command"),
+        }
+    }
+
+    #[test]
+    fn parse_post_with_options() {
+        let cli = Cli::parse_from([
+            "notecli",
+            "post",
+            "test",
+            "--cw",
+            "spoiler",
+            "--visibility",
+            "home",
+            "--reply-to",
+            "n123",
+            "--local-only",
+        ]);
+        match cli.command.unwrap() {
+            Commands::Post {
+                text,
+                cw,
+                visibility,
+                reply_to,
+                local_only,
+            } => {
+                assert_eq!(text, "test");
+                assert_eq!(cw.as_deref(), Some("spoiler"));
+                assert_eq!(visibility, "home");
+                assert_eq!(reply_to.as_deref(), Some("n123"));
+                assert!(local_only);
+            }
+            _ => panic!("Expected Post command"),
+        }
+    }
+
+    #[test]
+    fn parse_tl_default() {
+        let cli = Cli::parse_from(["notecli", "tl"]);
+        match cli.command.unwrap() {
+            Commands::Tl { r#type, limit } => {
+                assert_eq!(r#type, "home");
+                assert_eq!(limit, 20);
+            }
+            _ => panic!("Expected Tl command"),
+        }
+    }
+
+    #[test]
+    fn parse_tl_with_options() {
+        let cli = Cli::parse_from(["notecli", "tl", "local", "-l", "10"]);
+        match cli.command.unwrap() {
+            Commands::Tl { r#type, limit } => {
+                assert_eq!(r#type, "local");
+                assert_eq!(limit, 10);
+            }
+            _ => panic!("Expected Tl command"),
+        }
+    }
+
+    #[test]
+    fn parse_react() {
+        let cli = Cli::parse_from(["notecli", "react", "note123", ":star:"]);
+        match cli.command.unwrap() {
+            Commands::React {
+                note_id, reaction, ..
+            } => {
+                assert_eq!(note_id, "note123");
+                assert_eq!(reaction, ":star:");
+            }
+            _ => panic!("Expected React command"),
+        }
+    }
+
+    #[test]
+    fn parse_global_account_option() {
+        let cli = Cli::parse_from(["notecli", "-a", "@taka@misskey.io", "tl"]);
+        assert_eq!(cli.account.as_deref(), Some("@taka@misskey.io"));
+    }
+
+    #[test]
+    fn parse_output_format_json() {
+        let cli = Cli::parse_from(["notecli", "--json", "tl"]);
+        assert!(cli.json);
+        assert!(!cli.compact);
+        assert!(!cli.ids);
+        assert!(!cli.jsonl);
+    }
+
+    #[test]
+    fn parse_output_format_compact() {
+        let cli = Cli::parse_from(["notecli", "-c", "tl"]);
+        assert!(cli.compact);
+    }
+
+    #[test]
+    fn parse_output_format_ids() {
+        let cli = Cli::parse_from(["notecli", "--ids", "tl"]);
+        assert!(cli.ids);
+    }
+
+    #[test]
+    fn parse_output_format_jsonl() {
+        let cli = Cli::parse_from(["notecli", "--jsonl", "tl"]);
+        assert!(cli.jsonl);
+    }
+
+    #[test]
+    fn parse_search() {
+        let cli = Cli::parse_from(["notecli", "search", "Rust", "-l", "5"]);
+        match cli.command.unwrap() {
+            Commands::Search { query, limit } => {
+                assert_eq!(query, "Rust");
+                assert_eq!(limit, 5);
+            }
+            _ => panic!("Expected Search command"),
+        }
+    }
+
+    #[test]
+    fn parse_user_target() {
+        let cli = Cli::parse_from(["notecli", "user", "@taka@misskey.io"]);
+        match cli.command.unwrap() {
+            Commands::User { target } => {
+                assert_eq!(target, "@taka@misskey.io");
+            }
+            _ => panic!("Expected User command"),
+        }
+    }
+
+    #[test]
+    fn parse_daemon_default_port() {
+        let cli = Cli::parse_from(["notecli", "daemon"]);
+        match cli.command.unwrap() {
+            Commands::Daemon { port } => {
+                assert_eq!(port, 19820);
+            }
+            _ => panic!("Expected Daemon command"),
+        }
+    }
+
+    #[test]
+    fn parse_daemon_custom_port() {
+        let cli = Cli::parse_from(["notecli", "daemon", "--port", "8080"]);
+        match cli.command.unwrap() {
+            Commands::Daemon { port } => {
+                assert_eq!(port, 8080);
+            }
+            _ => panic!("Expected Daemon command"),
+        }
+    }
+
+    #[test]
+    fn parse_no_command() {
+        let cli = Cli::parse_from(["notecli"]);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn command_metadata_returns_all_subcommands() {
+        let meta = command_metadata();
+        let names: Vec<&str> = meta.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"daemon"));
+        assert!(names.contains(&"accounts"));
+        assert!(names.contains(&"login"));
+        assert!(names.contains(&"post"));
+        assert!(names.contains(&"tl"));
+        assert!(names.contains(&"search"));
+        assert!(names.contains(&"react"));
+        assert!(names.contains(&"user"));
+        assert!(names.contains(&"emojis"));
+    }
+
+    #[test]
+    fn command_metadata_post_has_args() {
+        let meta = command_metadata();
+        let post = meta.iter().find(|c| c.name == "post").unwrap();
+        let arg_names: Vec<&str> = post.args.iter().map(|a| a.name.as_str()).collect();
+        assert!(arg_names.contains(&"text"));
+        assert!(arg_names.contains(&"cw"));
+        assert!(arg_names.contains(&"visibility"));
+    }
+
+    #[test]
+    fn command_metadata_excludes_help_version() {
+        let meta = command_metadata();
+        for cmd in &meta {
+            for arg in &cmd.args {
+                assert_ne!(arg.name, "help");
+                assert_ne!(arg.name, "version");
+            }
+        }
+    }
+}
