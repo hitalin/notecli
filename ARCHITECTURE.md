@@ -2,16 +2,19 @@
 
 ## 設計理念
 
-**notecli = headless Misskey client library + CLI frontend**
+**notecli = Misskey クライアントライブラリ + CLI ツール（単一クレート）**
 
-- コアロジック（api, models, db, streaming）はライブラリとして再利用可能
-- CLI と HTTP daemon はそのライブラリの「フロントエンド」
-- NoteDeck は HTTP API 経由で利用する消費者の一つであり、notecli を支配しない
+- `lib.rs` でライブラリとして公開、`main.rs` で CLI バイナリを提供する単一クレート構成
+- コアロジック（api, models, db, streaming）がライブラリの本体。CLI と HTTP daemon はその消費者
+- NoteDeck が最大の消費者であり、Rust crate 依存としてコアモジュールを直接利用している
+- CLI は独立したフロントエンドとして、ライブラリと同じクレート内に同居する
 
 ### 判断基準
 
-変更を加えるとき「これは Misskey クライアントライブラリとして汎用的か？」を問う。
-Yes → notecli に入れる。No → 消費者側（NoteDeck 等）で実装する。
+変更を加えるとき：
+- **Misskey クライアントとして汎用的か？** → Yes ならコアモジュール（api, models, db, streaming）に入れる
+- **CLI 固有の機能か？** → main.rs / cli.rs に入れる
+- **NoteDeck 固有の機能か？** → NoteDeck 側で実装する（`build_core_routes()` 等の拡張ポイントを利用）
 
 ## レイヤー構成
 
