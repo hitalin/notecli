@@ -35,6 +35,22 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn new(
+        db: Arc<Database>,
+        client: Arc<MisskeyClient>,
+        event_bus: Arc<EventBus>,
+        api_token: String,
+        token_path: String,
+    ) -> Self {
+        Self {
+            db,
+            client,
+            event_bus,
+            api_token,
+            token_path,
+        }
+    }
+
     fn account_id_for_host(&self, host: &str) -> Result<String, ApiError> {
         let accounts = self.db.load_accounts()?;
         accounts
@@ -135,9 +151,24 @@ pub async fn start_on_port(
     }
 }
 
+/// Full router with `/api` index, auth middleware, and CORS.
+/// Use this for standalone notecli server.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let index_route = Router::new()
         .route("/api", get(index))
+        .layer(CorsLayer::permissive())
+        .with_state(state.clone());
+
+    Router::new()
+        .merge(index_route)
+        .merge(build_core_routes(state))
+}
+
+/// Core API routes with auth middleware and CORS, without the `/api` index.
+/// Use this when embedding notecli routes in a larger application that
+/// provides its own index endpoint.
+pub fn build_core_routes(state: AppState) -> Router {
+    Router::new()
         .route("/api/accounts", get(list_accounts))
         .route("/api/{host}/timeline/{tl_type}", get(get_timeline))
         .route("/api/{host}/notifications", get(get_notifications))
@@ -165,10 +196,6 @@ async fn auth_middleware(
     req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    if req.uri().path() == "/api" {
-        return Ok(next.run(req).await);
-    }
-
     let token = req
         .headers()
         .get(AUTHORIZATION)
@@ -265,7 +292,7 @@ async fn create_note(
         renote_id: body.renote_id,
         file_ids: body.file_ids,
         poll: None,
-        scheduled_at: None,
+        scheduled_at: body.scheduled_at,
     };
     let note = state
         .client
@@ -504,4 +531,5 @@ struct CreateNoteBody {
     reply_id: Option<String>,
     renote_id: Option<String>,
     file_ids: Option<Vec<String>>,
+    scheduled_at: Option<String>,
 }
