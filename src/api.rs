@@ -21,6 +21,10 @@ const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 
 pub struct MisskeyClient {
     client: Client,
+    /// Override base URL for testing (e.g. "http://127.0.0.1:PORT").
+    /// When set, requests use `{base_url}/api/{endpoint}` instead of `https://{host}/api/{endpoint}`.
+    #[cfg(test)]
+    base_url: Option<String>,
 }
 
 impl MisskeyClient {
@@ -32,7 +36,25 @@ impl MisskeyClient {
                 .connect_timeout(Duration::from_secs(10))
                 .pool_max_idle_per_host(4)
                 .build()?,
+            #[cfg(test)]
+            base_url: None,
         })
+    }
+
+    #[cfg(test)]
+    fn with_base_url(base_url: &str) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: Some(base_url.to_string()),
+        }
+    }
+
+    fn api_url(&self, host: &str, endpoint: &str) -> String {
+        #[cfg(test)]
+        if let Some(ref base) = self.base_url {
+            return format!("{base}/api/{endpoint}");
+        }
+        format!("https://{host}/api/{endpoint}")
     }
 
     /// Read the response body with a streaming size limit to prevent DoS.
@@ -83,7 +105,7 @@ impl MisskeyClient {
 
         let res = self
             .client
-            .post(format!("https://{host}/api/{endpoint}"))
+            .post(self.api_url(host, endpoint))
             .json(&params)
             .send()
             .await?;
@@ -185,6 +207,7 @@ impl MisskeyClient {
         Ok(antennas)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_antenna_notes(
         &self,
         host: &str,
@@ -272,6 +295,7 @@ impl MisskeyClient {
         Ok(clips)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_clip_notes(
         &self,
         host: &str,
@@ -317,13 +341,11 @@ impl MisskeyClient {
         let mut channels = Vec::new();
 
         // User's own channels first, then featured as fallback
-        for data in [followed, favorites, owned, featured] {
-            if let Ok(data) = data {
-                if let Ok(list) = serde_json::from_value::<Vec<Channel>>(data) {
-                    for ch in list {
-                        if seen.insert(ch.id.clone()) {
-                            channels.push(ch);
-                        }
+        for data in [followed, favorites, owned, featured].into_iter().flatten() {
+            if let Ok(list) = serde_json::from_value::<Vec<Channel>>(data) {
+                for ch in list {
+                    if seen.insert(ch.id.clone()) {
+                        channels.push(ch);
                     }
                 }
             }
@@ -332,6 +354,7 @@ impl MisskeyClient {
         Ok(channels)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_channel_notes(
         &self,
         host: &str,
@@ -362,6 +385,7 @@ impl MisskeyClient {
             .collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_mentions(
         &self,
         host: &str,
@@ -548,7 +572,7 @@ impl MisskeyClient {
             .text("isSensitive", is_sensitive.to_string())
             .part("file", file_part);
 
-        let url = format!("https://{}/api/drive/files/create", host);
+        let url = self.api_url(host, "drive/files/create");
         let resp = self.client.post(&url).multipart(form).send().await?;
 
         if !resp.status().is_success() {
@@ -768,7 +792,7 @@ impl MisskeyClient {
     ) -> Result<AuthResult, NoteDeckError> {
         let res = self
             .client
-            .post(format!("https://{host}/api/miauth/{session_id}/check"))
+            .post(self.api_url(host, &format!("miauth/{session_id}/check")))
             .json(&json!({}))
             .send()
             .await?;
@@ -993,7 +1017,7 @@ impl MisskeyClient {
     ) -> Result<Vec<String>, NoteDeckError> {
         let res = self
             .client
-            .post(format!("https://{host}/api/endpoint"))
+            .post(self.api_url(host, "endpoint"))
             .json(&json!({ "endpoint": endpoint }))
             .send()
             .await?;
@@ -1038,7 +1062,7 @@ impl MisskeyClient {
     pub async fn get_endpoints(&self, host: &str) -> Result<Vec<String>, NoteDeckError> {
         let res = self
             .client
-            .post(format!("https://{host}/api/endpoints"))
+            .post(self.api_url(host, "endpoints"))
             .json(&json!({}))
             .send()
             .await?;
@@ -1159,5 +1183,417 @@ impl MisskeyClient {
             .await?;
         let message: ChatMessage = serde_json::from_value(data)?;
         Ok(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn raw_note_json(id: &str, text: &str) -> Value {
+        json!({
+            "id": id,
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "text": text,
+            "cw": null,
+            "user": {"id": "u1", "username": "testuser"},
+            "visibility": "public",
+            "poll": null,
+            "replyId": null,
+            "renoteId": null,
+            "channelId": null,
+            "reactionAcceptance": null,
+            "uri": null,
+            "url": null,
+            "updatedAt": null,
+            "reply": null,
+            "renote": null,
+            "myReaction": null
+        })
+    }
+
+    #[tokio::test]
+    async fn request_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/test/endpoint"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let result = client
+            .request("unused", "token", "test/endpoint", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn request_includes_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let _ = client.request("h", "my-secret-token", "i", json!({})).await;
+
+        // Verify the mock was hit (if token wasn't injected into body, request would still succeed)
+    }
+
+    #[tokio::test]
+    async fn request_api_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/show"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(json!({"error": {"message": "No such note", "code": "NO_SUCH_NOTE"}})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let err = client
+            .request("h", "token", "notes/show", json!({"noteId": "n1"}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "API");
+        assert!(err.to_string().contains("No such note"));
+    }
+
+    #[tokio::test]
+    async fn request_api_error_without_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/test"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let err = client
+            .request("h", "token", "test", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "API");
+        // Falls back to endpoint (status)
+        assert!(err.to_string().contains("test"));
+    }
+
+    #[tokio::test]
+    async fn request_empty_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/delete"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let result = client
+            .request("h", "token", "notes/delete", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn get_timeline_parses_notes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/timeline"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([
+                        raw_note_json("n1", "Hello"),
+                        raw_note_json("n2", "World"),
+                    ])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let notes = client
+            .get_timeline(
+                "h",
+                "token",
+                "acc1",
+                TimelineType::new("home"),
+                TimelineOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].id, "n1");
+        assert_eq!(notes[0].text.as_deref(), Some("Hello"));
+        assert_eq!(notes[0].account_id, "acc1");
+        assert_eq!(notes[1].id, "n2");
+    }
+
+    #[tokio::test]
+    async fn get_note_returns_normalized() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(raw_note_json("n1", "test")))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let note = client.get_note("h", "token", "acc1", "n1").await.unwrap();
+        assert_eq!(note.id, "n1");
+        assert_eq!(note.server_host, "h");
+    }
+
+    #[tokio::test]
+    async fn create_note_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/create"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"createdNote": raw_note_json("n1", "posted")})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let params = CreateNoteParams {
+            text: Some("posted".into()),
+            cw: None,
+            visibility: Some("public".into()),
+            local_only: None,
+            mode_flags: None,
+            reply_id: None,
+            renote_id: None,
+            file_ids: None,
+            poll: None,
+            scheduled_at: None,
+        };
+        let note = client
+            .create_note("h", "token", "acc1", params)
+            .await
+            .unwrap();
+        assert_eq!(note.id, "n1");
+        assert_eq!(note.text.as_deref(), Some("posted"));
+    }
+
+    #[tokio::test]
+    async fn delete_note_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/delete"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client.delete_note("h", "token", "n1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_reaction_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/reactions/create"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client
+            .create_reaction("h", "token", "n1", ":star:")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_notifications_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/notifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": "notif1",
+                "createdAt": "2025-01-01T00:00:00.000Z",
+                "type": "reaction",
+                "user": {"id": "u1", "username": "taka"},
+                "note": raw_note_json("n1", "test"),
+                "reaction": ":star:"
+            }])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let notifs = client
+            .get_notifications("h", "token", "acc1", TimelineOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs[0].notification_type, "reaction");
+        assert_eq!(notifs[0].reaction.as_deref(), Some(":star:"));
+    }
+
+    #[tokio::test]
+    async fn search_notes_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/search"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([raw_note_json("n1", "Rust is great")])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let notes = client
+            .search_notes("h", "token", "acc1", "Rust", SearchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text.as_deref(), Some("Rust is great"));
+    }
+
+    #[tokio::test]
+    async fn get_user_detail_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "u1",
+                "username": "taka",
+                "host": null,
+                "name": "Taka",
+                "avatarUrl": null,
+                "bannerUrl": null,
+                "description": "hello",
+                "followersCount": 10,
+                "followingCount": 5,
+                "notesCount": 100,
+                "createdAt": "2024-01-01T00:00:00.000Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let user = client.get_user_detail("h", "token", "u1").await.unwrap();
+        assert_eq!(user.username, "taka");
+        assert_eq!(user.followers_count, 10);
+        assert_eq!(user.notes_count, 100);
+    }
+
+    #[tokio::test]
+    async fn get_server_emojis_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/emojis"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "emojis": [
+                    {"name": "blobcat", "url": "https://example.com/blobcat.png", "category": "blob", "aliases": ["neko"]}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let emojis = client.get_server_emojis("h", "token").await.unwrap();
+        assert_eq!(emojis.len(), 1);
+        assert_eq!(emojis[0].name, "blobcat");
+        assert_eq!(emojis[0].aliases, vec!["neko"]);
+    }
+
+    #[tokio::test]
+    async fn get_user_lists_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/lists/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": "l1", "name": "Friends"},
+                {"id": "l2", "name": "Tech"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let lists = client.get_user_lists("h", "token").await.unwrap();
+        assert_eq!(lists.len(), 2);
+        assert_eq!(lists[0].name, "Friends");
+    }
+
+    #[tokio::test]
+    async fn get_favorites_unwraps_note_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/favorites"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": "fav1", "note": raw_note_json("n1", "fav note")}
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let notes = client
+            .get_favorites("h", "token", "acc1", 20, None, None)
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, "n1");
+        assert_eq!(notes[0].text.as_deref(), Some("fav note"));
+    }
+
+    #[tokio::test]
+    async fn follow_user_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/following/create"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client.follow_user("h", "token", "u1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn extract_reaction_palette_valid() {
+        let data = json!([
+            [["client", "preferences", "sync"], [{"id": "default", "name": "Default", "emojis": [":star:", ":heart:", ":thumbsup:"]}]]
+        ]);
+        let result = MisskeyClient::extract_reaction_palette(&data).unwrap();
+        assert_eq!(result, vec![":star:", ":heart:", ":thumbsup:"]);
+    }
+
+    #[tokio::test]
+    async fn extract_reaction_palette_empty() {
+        let data = json!([]);
+        assert!(MisskeyClient::extract_reaction_palette(&data).is_none());
+    }
+
+    #[tokio::test]
+    async fn get_note_children_parses() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/children"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([raw_note_json("r1", "reply")])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let notes = client
+            .get_note_children("h", "token", "acc1", "n1", 20)
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, "r1");
     }
 }

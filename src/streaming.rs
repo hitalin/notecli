@@ -266,10 +266,10 @@ impl StreamingManager {
         let mut conns = self.connections.lock().await;
         if let Some(handle) = conns.remove(account_id) {
             if let Err(e) = handle.cmd_tx.send(WsCommand::Shutdown) {
-                eprintln!("[stream] failed to send shutdown for {account_id}: {e}");
+                tracing::warn!(account_id, error = %e, "failed to send shutdown");
             }
             if let Err(e) = handle.task.await {
-                eprintln!("[stream] task join error for {account_id}: {e}");
+                tracing::error!(account_id, error = %e, "task join error");
             }
         }
 
@@ -534,6 +534,7 @@ enum WsExitReason {
 const MAX_BACKOFF_SECS: u64 = 30;
 
 /// Top-level task that handles reconnection with exponential backoff.
+#[allow(clippy::too_many_arguments)]
 async fn connection_task(
     emitter: Arc<dyn FrontendEmitter>,
     event_bus: Arc<EventBus>,
@@ -613,11 +614,11 @@ async fn connection_task(
                 }
             }
             Ok(Err(e)) => {
-                eprintln!("[stream] reconnect failed for {account_id}: {e}");
+                tracing::warn!(account_id = %account_id, error = %e, backoff_secs, "reconnect failed");
                 backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
             }
             Err(_) => {
-                eprintln!("[stream] reconnect timeout for {account_id}");
+                tracing::warn!(account_id = %account_id, backoff_secs, "reconnect timeout");
                 backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
             }
         }
@@ -654,13 +655,14 @@ async fn run_ws_session(
         let msg = json!({ "type": "connect", "body": body });
         let mut w = write.lock().await;
         if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-            eprintln!("[stream] re-subscribe send failed: {e}");
+            tracing::warn!(error = %e, "re-subscribe send failed");
         }
     }
 
     ws_loop(emitter, event_bus, db, account_id, read, write, cmd_rx, subscriptions).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ws_loop(
     emitter: &Arc<dyn FrontendEmitter>,
     event_bus: &Arc<EventBus>,
@@ -691,7 +693,7 @@ async fn ws_loop(
                     Some(Ok(Message::Ping(data))) => {
                         let mut w = write.lock().await;
                         if let Err(e) = w.send(Message::Pong(data)).await {
-                            eprintln!("[stream] pong send failed: {e}");
+                            tracing::warn!(error = %e, "pong send failed");
                             return WsExitReason::Disconnected;
                         }
                     }
@@ -711,7 +713,7 @@ async fn ws_loop(
                         let msg = json!({ "type": "connect", "body": body });
                         let mut w = write.lock().await;
                         if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-                            eprintln!("[stream] subscribe send failed: {e}");
+                            tracing::warn!(error = %e, "subscribe send failed");
                         }
                     }
                     Some(WsCommand::Unsubscribe { id }) => {
@@ -721,21 +723,21 @@ async fn ws_loop(
                         });
                         let mut w = write.lock().await;
                         if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-                            eprintln!("[stream] unsubscribe send failed: {e}");
+                            tracing::warn!(error = %e, "unsubscribe send failed");
                         }
                     }
                     Some(WsCommand::SubNote { id }) => {
                         let msg = json!({ "type": "subNote", "body": { "id": id } });
                         let mut w = write.lock().await;
                         if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-                            eprintln!("[stream] subNote send failed: {e}");
+                            tracing::warn!(error = %e, "subNote send failed");
                         }
                     }
                     Some(WsCommand::UnsubNote { id }) => {
                         let msg = json!({ "type": "unsubNote", "body": { "id": id } });
                         let mut w = write.lock().await;
                         if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-                            eprintln!("[stream] unsubNote send failed: {e}");
+                            tracing::warn!(error = %e, "unsubNote send failed");
                         }
                     }
                     Some(WsCommand::Shutdown) | None => {
@@ -748,7 +750,7 @@ async fn ws_loop(
             _ = ping_interval.tick() => {
                 let mut w = write.lock().await;
                 if let Err(e) = w.send(Message::Ping(vec![].into())).await {
-                    eprintln!("[stream] keepalive ping failed for {account_id}: {e}");
+                    tracing::warn!(account_id, error = %e, "keepalive ping failed");
                     return WsExitReason::Disconnected;
                 }
             }
@@ -835,7 +837,7 @@ async fn handle_ws_message(
             let timeline_type = info.timeline_type.clone();
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = db.cache_note(&note_clone, &timeline_type) {
-                    eprintln!("[cache] failed to cache streamed note: {e}");
+                    tracing::warn!(error = %e, "failed to cache streamed note");
                 }
             });
             let payload = StreamNoteEvent {

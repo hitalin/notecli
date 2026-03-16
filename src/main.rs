@@ -39,8 +39,16 @@ fn output_format(cli: &Cli) -> OutputFormat {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     if let Err(e) = notecli::keychain::init_store() {
-        eprintln!("Warning: keychain unavailable ({})", e);
+        tracing::warn!(error = %e, "keychain unavailable");
     }
 
     let cli = Cli::parse();
@@ -60,7 +68,7 @@ async fn main() {
                     OutputFormat::Json | OutputFormat::Jsonl => {
                         let err =
                             serde_json::json!({ "error": e.code(), "message": e.safe_message() });
-                        eprintln!("{}", err);
+                        eprintln!("{err}");
                     }
                     _ => {
                         eprintln!("Error: {}", e.safe_message());
@@ -97,9 +105,7 @@ async fn run_daemon(port: u16) {
     }
     let token_path_str = token_path.to_string_lossy().to_string();
 
-    eprintln!("[notecli] data dir: {}", data_dir.display());
-    eprintln!("[notecli] token: {token_path_str}");
-    eprintln!("[notecli] port: {port}");
+    tracing::info!(data_dir = %data_dir.display(), token_path = %token_path_str, port, "daemon starting");
 
     notecli::http_server::start_on_port(db, client, event_bus, api_token, token_path_str, port)
         .await;
@@ -221,7 +227,7 @@ async fn run_cli(
                     &host,
                     &token,
                     &account.id,
-                    &query,
+                    query,
                     SearchOptions::new(*limit),
                 )
                 .await?;
@@ -245,7 +251,7 @@ async fn run_cli(
             print_notes(&notes, fmt);
         }
         Commands::Note { id } => {
-            let note = client.get_note(&host, &token, &account.id, &id).await?;
+            let note = client.get_note(&host, &token, &account.id, id).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!("{}", serde_json::to_string(&note).unwrap());
@@ -268,7 +274,7 @@ async fn run_cli(
             print_notes(&notes, fmt);
         }
         Commands::Delete { id } => {
-            client.delete_note(&host, &token, &id).await?;
+            client.delete_note(&host, &token, id).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!(r#"{{"deleted":"{}"}}"#, id);
@@ -290,7 +296,7 @@ async fn run_cli(
                 poll: None,
                 scheduled_at: None,
             };
-            client.update_note(&host, &token, &id, params).await?;
+            client.update_note(&host, &token, id, params).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!(r#"{{"updated":"{}"}}"#, id);
@@ -301,7 +307,7 @@ async fn run_cli(
         }
         Commands::React { note_id, reaction } => {
             client
-                .create_reaction(&host, &token, &note_id, &reaction)
+                .create_reaction(&host, &token, note_id, reaction)
                 .await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
@@ -315,7 +321,7 @@ async fn run_cli(
             }
         }
         Commands::Unreact { note_id } => {
-            client.delete_reaction(&host, &token, &note_id).await?;
+            client.delete_reaction(&host, &token, note_id).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!(r#"{{"unreacted":"{}"}}"#, note_id);
@@ -352,7 +358,7 @@ async fn run_cli(
             }
         }
         Commands::User { target } => {
-            let detail = resolve_and_get_user(&client, &host, &token, &target).await?;
+            let detail = resolve_and_get_user(&client, &host, &token, target).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!("{}", serde_json::to_string(&detail).unwrap());
@@ -381,14 +387,14 @@ async fn run_cli(
                     &host,
                     &token,
                     &account.id,
-                    &user_id,
+                    user_id,
                     TimelineOptions::new(*limit, None, None),
                 )
                 .await?;
             print_notes(&notes, fmt);
         }
         Commands::Follow { user_id } => {
-            client.follow_user(&host, &token, &user_id).await?;
+            client.follow_user(&host, &token, user_id).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!(r#"{{"followed":"{}"}}"#, user_id);
@@ -398,7 +404,7 @@ async fn run_cli(
             }
         }
         Commands::Unfollow { user_id } => {
-            client.unfollow_user(&host, &token, &user_id).await?;
+            client.unfollow_user(&host, &token, user_id).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!(r#"{{"unfollowed":"{}"}}"#, user_id);
@@ -408,7 +414,7 @@ async fn run_cli(
             }
         }
         Commands::Favorite { note_id } => {
-            client.create_favorite(&host, &token, &note_id).await?;
+            client.create_favorite(&host, &token, note_id).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!(r#"{{"favorited":"{}"}}"#, note_id);
@@ -418,7 +424,7 @@ async fn run_cli(
             }
         }
         Commands::Unfavorite { note_id } => {
-            client.delete_favorite(&host, &token, &note_id).await?;
+            client.delete_favorite(&host, &token, note_id).await?;
             match fmt {
                 OutputFormat::Json | OutputFormat::Jsonl => {
                     println!(r#"{{"unfavorited":"{}"}}"#, note_id);
@@ -773,7 +779,7 @@ fn print_notification_compact(n: &NormalizedNotification) {
     let user = n
         .user
         .as_ref()
-        .map(|u| format_user(u))
+        .map(format_user)
         .unwrap_or_default();
     let note_id = n
         .note
@@ -785,7 +791,7 @@ fn print_notification_compact(n: &NormalizedNotification) {
         .note
         .as_ref()
         .and_then(|n| n.text.as_deref())
-        .map(|t| oneline(t))
+        .map(oneline)
         .unwrap_or_default();
     println!(
         "{}\t{}\t{}\t{}\t{}",
@@ -797,7 +803,7 @@ fn print_notification(n: &NormalizedNotification) {
     let user = n
         .user
         .as_ref()
-        .map(|u| format_user(u))
+        .map(format_user)
         .unwrap_or_default();
     let note_preview = n
         .note

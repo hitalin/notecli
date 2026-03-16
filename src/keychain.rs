@@ -1,5 +1,6 @@
 use crate::error::NoteDeckError;
 
+#[cfg(feature = "keyring")]
 const SERVICE: &str = "notedeck";
 
 /// Initialize the platform-specific credential store.

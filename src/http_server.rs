@@ -136,18 +136,18 @@ pub async fn start_on_port(
     let app = build_router(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    eprintln!("[http] listening on http://{addr}");
+    tracing::info!(%addr, "HTTP server listening");
 
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[http] failed to bind {addr}: {e}");
+            tracing::error!(%addr, error = %e, "failed to bind");
             return;
         }
     };
 
     if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("[http] server error: {e}");
+        tracing::error!(error = %e, "HTTP server error");
     }
 }
 

@@ -65,23 +65,23 @@ impl NoteDeckError {
     pub fn safe_message(&self) -> String {
         match self {
             Self::Database(e) => {
-                eprintln!("[error] Database: {e}");
+                tracing::error!(error = %e, "Database error");
                 "Database operation failed".to_string()
             }
             Self::Network(e) => {
-                eprintln!("[error] Network: {e}");
+                tracing::error!(error = %e, "Network error");
                 "Network request failed".to_string()
             }
             Self::Json(e) => {
-                eprintln!("[error] JSON: {e}");
+                tracing::error!(error = %e, "JSON parse error");
                 "Invalid response format".to_string()
             }
             Self::WebSocket(e) => {
-                eprintln!("[error] WebSocket: {e}");
+                tracing::error!(error = %e, "WebSocket error");
                 "Connection error".to_string()
             }
             Self::Keychain(e) => {
-                eprintln!("[error] Keychain: {e}");
+                tracing::error!(error = %e, "Keychain error");
                 "Credential storage error".to_string()
             }
             // These contain messages we control — safe to expose
