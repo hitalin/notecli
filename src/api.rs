@@ -1184,6 +1184,96 @@ impl MisskeyClient {
         let message: ChatMessage = serde_json::from_value(data)?;
         Ok(message)
     }
+
+    // --- Server Discovery (unauthenticated) ---
+
+    /// Fetch nodeinfo via .well-known/nodeinfo.
+    /// Returns the parsed nodeinfo JSON.
+    pub async fn fetch_nodeinfo(&self, host: &str) -> Result<Value, NoteDeckError> {
+        let well_known_url = format!("https://{host}/.well-known/nodeinfo");
+        let res = self
+            .client
+            .get(&well_known_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            return Err(NoteDeckError::Api {
+                endpoint: ".well-known/nodeinfo".to_string(),
+                status: res.status().as_u16(),
+                message: "Failed to fetch well-known nodeinfo".to_string(),
+            });
+        }
+        let text = Self::read_body_limited(res, ".well-known/nodeinfo").await?;
+        let well_known: Value = serde_json::from_str(&text)?;
+
+        let nodeinfo_url = well_known["links"]
+            .as_array()
+            .and_then(|links| {
+                links.iter().find_map(|link| {
+                    let rel = link["rel"].as_str().unwrap_or("");
+                    if rel.contains("nodeinfo") {
+                        link["href"].as_str().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| NoteDeckError::Api {
+                endpoint: ".well-known/nodeinfo".to_string(),
+                status: 0,
+                message: format!("No nodeinfo URL found for {host}"),
+            })?;
+
+        // Validate URL to prevent SSRF: must be https://{host}/...
+        let expected_prefix = format!("https://{host}/");
+        if !nodeinfo_url.starts_with(&expected_prefix) {
+            return Err(NoteDeckError::Api {
+                endpoint: ".well-known/nodeinfo".to_string(),
+                status: 0,
+                message: format!("Nodeinfo URL host/scheme mismatch for {host}"),
+            });
+        }
+
+        let res = self
+            .client
+            .get(&nodeinfo_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            return Err(NoteDeckError::Api {
+                endpoint: "nodeinfo".to_string(),
+                status: res.status().as_u16(),
+                message: "Failed to fetch nodeinfo".to_string(),
+            });
+        }
+        let text = Self::read_body_limited(res, "nodeinfo").await?;
+        let nodeinfo: Value = serde_json::from_str(&text)?;
+        Ok(nodeinfo)
+    }
+
+    /// Fetch server meta (icon URL) via /api/meta (unauthenticated).
+    pub async fn fetch_server_meta(&self, host: &str) -> Result<Value, NoteDeckError> {
+        let url = self.api_url(host, "meta");
+        let res = self
+            .client
+            .post(&url)
+            .json(&json!({}))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            return Err(NoteDeckError::Api {
+                endpoint: "meta".to_string(),
+                status: res.status().as_u16(),
+                message: "Failed to fetch server meta".to_string(),
+            });
+        }
+        let text = Self::read_body_limited(res, "meta").await?;
+        let meta: Value = serde_json::from_str(&text)?;
+        Ok(meta)
+    }
 }
 
 #[cfg(test)]
