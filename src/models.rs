@@ -44,10 +44,11 @@ pub struct AccountPublic {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub software: String,
+    pub has_token: bool,
 }
 
-impl From<&Account> for AccountPublic {
-    fn from(a: &Account) -> Self {
+impl AccountPublic {
+    pub fn new(a: &Account, has_token: bool) -> Self {
         Self {
             id: a.id.clone(),
             host: a.host.clone(),
@@ -56,7 +57,14 @@ impl From<&Account> for AccountPublic {
             display_name: a.display_name.clone(),
             avatar_url: a.avatar_url.clone(),
             software: a.software.clone(),
+            has_token,
         }
+    }
+}
+
+impl From<&Account> for AccountPublic {
+    fn from(a: &Account) -> Self {
+        Self::new(a, !a.token.is_empty())
     }
 }
 
@@ -1053,13 +1061,33 @@ mod tests {
             avatar_url: Some("https://example.com/avatar.png".into()),
             software: "misskey".into(),
         };
-        let public = AccountPublic::from(&account);
+        let public = AccountPublic::new(&account, true);
         assert_eq!(public.id, "acc1");
         assert_eq!(public.host, "misskey.io");
         assert_eq!(public.username, "taka");
+        assert!(public.has_token);
         // AccountPublic has no token field
         let json = serde_json::to_value(&public).unwrap();
         assert!(json.get("token").is_none());
+        assert_eq!(json.get("hasToken").unwrap(), true);
+    }
+
+    #[test]
+    fn account_public_without_token() {
+        let account = Account {
+            id: "acc2".into(),
+            host: "misskey.io".into(),
+            token: "".into(),
+            user_id: "uid2".into(),
+            username: "user2".into(),
+            display_name: None,
+            avatar_url: None,
+            software: "misskey".into(),
+        };
+        let public = AccountPublic::new(&account, false);
+        assert!(!public.has_token);
+        let json = serde_json::to_value(&public).unwrap();
+        assert_eq!(json.get("hasToken").unwrap(), false);
     }
 
     // ---- Raw -> Normalized conversions ----
