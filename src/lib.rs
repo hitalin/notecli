@@ -1,8 +1,10 @@
 pub mod api;
 pub mod cli;
+pub mod commands;
 pub mod db;
 pub mod error;
 pub mod event_bus;
+pub mod format;
 pub mod http_server;
 pub mod keychain;
 pub mod models;
