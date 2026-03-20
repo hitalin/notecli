@@ -19,6 +19,17 @@ use crate::models::{
 /// Maximum response body size (50 MB) to prevent memory exhaustion from malicious servers.
 const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 
+/// Options for `search_users`.
+#[derive(Default)]
+pub struct SearchUsersOptions<'a> {
+    pub query: Option<&'a str>,
+    pub origin: Option<&'a str>,
+    pub sort: Option<&'a str>,
+    pub state: Option<&'a str>,
+    pub limit: i64,
+    pub offset: Option<i64>,
+}
+
 pub struct MisskeyClient {
     client: Client,
     /// Override base URL for testing (e.g. "http://127.0.0.1:PORT").
@@ -1189,27 +1200,22 @@ impl MisskeyClient {
         &self,
         host: &str,
         token: &str,
-        query: Option<&str>,
-        origin: Option<&str>,
-        sort: Option<&str>,
-        state: Option<&str>,
-        limit: i64,
-        offset: Option<i64>,
+        opts: SearchUsersOptions<'_>,
     ) -> Result<Value, NoteDeckError> {
-        let mut params = json!({ "limit": limit });
-        if let Some(q) = query {
+        let mut params = json!({ "limit": opts.limit });
+        if let Some(q) = opts.query {
             params["query"] = json!(q);
         }
-        if let Some(o) = origin {
+        if let Some(o) = opts.origin {
             params["origin"] = json!(o);
         }
-        if let Some(s) = sort {
+        if let Some(s) = opts.sort {
             params["sort"] = json!(s);
         }
-        if let Some(s) = state {
+        if let Some(s) = opts.state {
             params["state"] = json!(s);
         }
-        if let Some(o) = offset {
+        if let Some(o) = opts.offset {
             params["offset"] = json!(o);
         }
         self.request(host, token, "users", params).await
