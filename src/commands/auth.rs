@@ -115,7 +115,13 @@ pub async fn run_login(
 
     db.upsert_account(&account)?;
 
-    if crate::keychain::store_token(&account_id, &auth.token).is_ok() {
+    // Store to keychain and verify before clearing DB (keyutils may lose keys across processes)
+    if crate::keychain::store_token(&account_id, &auth.token).is_ok()
+        && crate::keychain::get_token(&account_id)
+            .ok()
+            .flatten()
+            .is_some()
+    {
         let _ = db.clear_token(&account_id);
     }
 
