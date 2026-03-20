@@ -496,6 +496,8 @@ pub struct SearchOptions {
     limit: i64,
     pub since_id: Option<String>,
     pub until_id: Option<String>,
+    pub since_date: Option<i64>,
+    pub until_date: Option<i64>,
 }
 
 impl SearchOptions {
@@ -504,6 +506,8 @@ impl SearchOptions {
             limit,
             since_id: None,
             until_id: None,
+            since_date: None,
+            until_date: None,
         }
     }
 
@@ -518,6 +522,8 @@ impl Default for SearchOptions {
             limit: 20,
             since_id: None,
             until_id: None,
+            since_date: None,
+            until_date: None,
         }
     }
 }

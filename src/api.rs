@@ -726,6 +726,12 @@ impl MisskeyClient {
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let mut params = json!({ "query": query, "limit": options.limit() });
         apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        if let Some(d) = options.since_date {
+            params["sinceDate"] = json!(d);
+        }
+        if let Some(d) = options.until_date {
+            params["untilDate"] = json!(d);
+        }
         let data = self.request(host, token, "notes/search", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw

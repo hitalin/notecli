@@ -279,38 +279,90 @@ impl Database {
         query: &str,
         limit: i64,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
-        let conn = self.lock()?;
+        self.search_cached_notes_advanced(account_id, query, limit, None, None, false)
+    }
 
-        // FTS5 trigram requires 3+ characters; fall back to LIKE for shorter queries
-        let rows: Vec<String> = if query.chars().count() >= 3 {
+    pub fn search_cached_notes_advanced(
+        &self,
+        account_id: &str,
+        query: &str,
+        limit: i64,
+        since_date: Option<&str>,
+        until_date: Option<&str>,
+        ascending: bool,
+    ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
+        let conn = self.lock()?;
+        let order = if ascending { "ASC" } else { "DESC" };
+        let has_query = !query.is_empty();
+
+        let mut conditions = vec!["nc.account_id = ?1".to_string()];
+        let mut param_idx = 2u32;
+
+        let fts_query;
+        let like_pattern;
+        let use_fts = has_query && query.chars().count() >= 3;
+        let use_like = has_query && !use_fts;
+
+        if use_fts {
             let escaped = query.replace('"', "\"\"");
-            let fts_query = format!("\"{escaped}\"");
-            let mut stmt = conn.prepare_cached(
-                "SELECT nc.note_json FROM notes_cache nc
-                 WHERE nc.account_id = ?1
-                   AND nc.rowid IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?2)
-                 ORDER BY nc.created_at DESC
-                 LIMIT ?3",
-            )?;
-            let result: Vec<String> = stmt
-                .query_map(params![account_id, fts_query, limit], |row| row.get(0))?
-                .filter_map(|r| r.ok())
-                .collect();
-            result
+            fts_query = format!("\"{escaped}\"");
+            conditions.push(format!(
+                "nc.rowid IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?{param_idx})"
+            ));
+            param_idx += 1;
         } else {
-            let pattern = format!("%{query}%");
-            let mut stmt = conn.prepare_cached(
-                "SELECT note_json FROM notes_cache
-                 WHERE account_id = ?1 AND text LIKE ?2
-                 ORDER BY created_at DESC
-                 LIMIT ?3",
-            )?;
-            let result: Vec<String> = stmt
-                .query_map(params![account_id, pattern, limit], |row| row.get(0))?
-                .filter_map(|r| r.ok())
-                .collect();
-            result
-        };
+            fts_query = String::new();
+        }
+        if use_like {
+            like_pattern = format!("%{query}%");
+            conditions.push(format!("nc.text LIKE ?{param_idx}"));
+            param_idx += 1;
+        } else {
+            like_pattern = String::new();
+        }
+
+        if since_date.is_some() {
+            conditions.push(format!("nc.created_at >= ?{param_idx}"));
+            param_idx += 1;
+        }
+        if until_date.is_some() {
+            conditions.push(format!("nc.created_at <= ?{param_idx}"));
+            param_idx += 1;
+        }
+
+        let sql = format!(
+            "SELECT nc.note_json FROM notes_cache nc WHERE {} ORDER BY nc.created_at {order} LIMIT ?{param_idx}",
+            conditions.join(" AND "),
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+
+        let mut dynamic_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        dynamic_params.push(Box::new(account_id.to_string()));
+        if use_fts {
+            dynamic_params.push(Box::new(fts_query));
+        }
+        if use_like {
+            dynamic_params.push(Box::new(like_pattern));
+        }
+        if let Some(d) = since_date {
+            dynamic_params.push(Box::new(d.to_string()));
+        }
+        if let Some(d) = until_date {
+            dynamic_params.push(Box::new(d.to_string()));
+        }
+        dynamic_params.push(Box::new(limit));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            dynamic_params.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let json_str: String = row.get(0)?;
+                Ok(json_str)
+            })?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<String>>();
 
         Ok(rows
             .into_iter()
