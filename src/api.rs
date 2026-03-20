@@ -30,6 +30,16 @@ pub struct SearchUsersOptions<'a> {
     pub offset: Option<i64>,
 }
 
+/// Apply sinceId/untilId pagination to a JSON params object.
+fn apply_pagination(params: &mut Value, since_id: Option<&str>, until_id: Option<&str>) {
+    if let Some(id) = since_id {
+        params["sinceId"] = json!(id);
+    }
+    if let Some(id) = until_id {
+        params["untilId"] = json!(id);
+    }
+}
+
 pub struct MisskeyClient {
     client: Client,
     /// Override base URL for testing (e.g. "http://127.0.0.1:PORT").
@@ -160,12 +170,7 @@ impl MisskeyClient {
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let endpoint = timeline_type.api_endpoint();
         let mut params = json!({ "limit": options.limit() });
-        if let Some(ref id) = options.since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(ref id) = options.until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
         if let Some(ref f) = options.filters {
             if let Some(v) = f.with_renotes {
                 params["withRenotes"] = json!(v);
@@ -233,12 +238,7 @@ impl MisskeyClient {
             "antennaId": antenna_id,
             "limit": limit,
         });
-        if let Some(id) = since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, since_id, until_id);
         let data = self.request(host, token, "antennas/notes", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw
@@ -256,15 +256,8 @@ impl MisskeyClient {
         since_id: Option<&str>,
         until_id: Option<&str>,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
-        let mut params = json!({
-            "limit": limit,
-        });
-        if let Some(id) = since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        let mut params = json!({ "limit": limit });
+        apply_pagination(&mut params, since_id, until_id);
         let data = self.request(host, token, "i/favorites", params).await?;
         // i/favorites returns [{ id, note: {...}, ... }]
         let items: Vec<Value> = serde_json::from_value(data)?;
@@ -321,12 +314,7 @@ impl MisskeyClient {
             "clipId": clip_id,
             "limit": limit,
         });
-        if let Some(id) = since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, since_id, until_id);
         let data = self.request(host, token, "clips/notes", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw
@@ -380,12 +368,7 @@ impl MisskeyClient {
             "channelId": channel_id,
             "limit": limit,
         });
-        if let Some(id) = since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, since_id, until_id);
         let data = self
             .request(host, token, "channels/timeline", params)
             .await?;
@@ -408,12 +391,7 @@ impl MisskeyClient {
         visibility: Option<&str>,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let mut params = json!({ "limit": limit });
-        if let Some(id) = since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, since_id, until_id);
         if let Some(v) = visibility {
             params["visibility"] = json!(v);
         }
@@ -729,13 +707,7 @@ impl MisskeyClient {
         options: TimelineOptions,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let mut params = json!({ "userId": user_id, "limit": options.limit() });
-        if let Some(ref id) = options.since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(ref id) = options.until_id {
-            params["untilId"] = json!(id);
-        }
-
+        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
         let data = self.request(host, token, "users/notes", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw
@@ -753,13 +725,7 @@ impl MisskeyClient {
         options: SearchOptions,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let mut params = json!({ "query": query, "limit": options.limit() });
-        if let Some(ref id) = options.since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(ref id) = options.until_id {
-            params["untilId"] = json!(id);
-        }
-
+        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
         let data = self.request(host, token, "notes/search", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw
@@ -776,13 +742,7 @@ impl MisskeyClient {
         options: TimelineOptions,
     ) -> Result<Vec<NormalizedNotification>, NoteDeckError> {
         let mut params = json!({ "limit": options.limit() });
-        if let Some(ref id) = options.since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(ref id) = options.until_id {
-            params["untilId"] = json!(id);
-        }
-
+        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
         let data = self
             .request(host, token, "i/notifications", params)
             .await?;
@@ -1419,9 +1379,7 @@ impl MisskeyClient {
         until_id: Option<&str>,
     ) -> Result<Value, NoteDeckError> {
         let mut params = json!({ "userId": user_id, "limit": limit });
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, None, until_id);
         self.request(host, token, "users/featured-notes", params)
             .await
     }
@@ -1481,9 +1439,7 @@ impl MisskeyClient {
         until_id: Option<&str>,
     ) -> Result<Value, NoteDeckError> {
         let mut params = json!({ "limit": limit });
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, None, until_id);
         self.request(host, token, "gallery/posts", params).await
     }
 
@@ -1597,12 +1553,7 @@ impl MisskeyClient {
             "userId": user_id,
             "limit": limit,
         });
-        if let Some(id) = since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, since_id, until_id);
         let data = self
             .request(host, token, "chat/messages/user-timeline", params)
             .await?;
@@ -1623,12 +1574,7 @@ impl MisskeyClient {
             "roomId": room_id,
             "limit": limit,
         });
-        if let Some(id) = since_id {
-            params["sinceId"] = json!(id);
-        }
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, since_id, until_id);
         let data = self
             .request(host, token, "chat/messages/room-timeline", params)
             .await?;
@@ -1933,9 +1879,7 @@ impl MisskeyClient {
         until_id: Option<&str>,
     ) -> Result<Value, NoteDeckError> {
         let mut params = json!({ "userId": user_id, "limit": limit });
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, None, until_id);
         self.request(host, token, "users/following", params).await
     }
 
@@ -1948,9 +1892,7 @@ impl MisskeyClient {
         until_id: Option<&str>,
     ) -> Result<Value, NoteDeckError> {
         let mut params = json!({ "userId": user_id, "limit": limit });
-        if let Some(id) = until_id {
-            params["untilId"] = json!(id);
-        }
+        apply_pagination(&mut params, None, until_id);
         self.request(host, token, "users/followers", params).await
     }
 

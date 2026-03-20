@@ -80,24 +80,29 @@ impl Database {
 
     // --- Accounts ---
 
+    const ACCOUNT_COLUMNS: &str =
+        "id, host, token, user_id, username, display_name, avatar_url, software";
+
+    fn row_to_account(row: &rusqlite::Row) -> rusqlite::Result<Account> {
+        Ok(Account {
+            id: row.get(0)?,
+            host: row.get(1)?,
+            token: row.get(2)?,
+            user_id: row.get(3)?,
+            username: row.get(4)?,
+            display_name: row.get(5)?,
+            avatar_url: row.get(6)?,
+            software: row.get(7)?,
+        })
+    }
+
     pub fn load_accounts(&self) -> Result<Vec<Account>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, host, token, user_id, username, display_name, avatar_url, software
-             FROM accounts ORDER BY rowid",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Account {
-                id: row.get(0)?,
-                host: row.get(1)?,
-                token: row.get(2)?,
-                user_id: row.get(3)?,
-                username: row.get(4)?,
-                display_name: row.get(5)?,
-                avatar_url: row.get(6)?,
-                software: row.get(7)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM accounts ORDER BY rowid",
+            Self::ACCOUNT_COLUMNS
+        ))?;
+        let rows = stmt.query_map([], Self::row_to_account)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -128,22 +133,24 @@ impl Database {
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, host, token, user_id, username, display_name, avatar_url, software
-             FROM accounts WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query_map(params![id], |row| {
-            Ok(Account {
-                id: row.get(0)?,
-                host: row.get(1)?,
-                token: row.get(2)?,
-                user_id: row.get(3)?,
-                username: row.get(4)?,
-                display_name: row.get(5)?,
-                avatar_url: row.get(6)?,
-                software: row.get(7)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM accounts WHERE id = ?1",
+            Self::ACCOUNT_COLUMNS
+        ))?;
+        let mut rows = stmt.query_map(params![id], Self::row_to_account)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_account_by_host(&self, host: &str) -> Result<Option<Account>, NoteDeckError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM accounts WHERE host = ?1 LIMIT 1",
+            Self::ACCOUNT_COLUMNS
+        ))?;
+        let mut rows = stmt.query_map(params![host], Self::row_to_account)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
@@ -156,22 +163,11 @@ impl Database {
         user_id: &str,
     ) -> Result<Option<Account>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, host, token, user_id, username, display_name, avatar_url, software
-             FROM accounts WHERE host = ?1 AND user_id = ?2",
-        )?;
-        let mut rows = stmt.query_map(params![host, user_id], |row| {
-            Ok(Account {
-                id: row.get(0)?,
-                host: row.get(1)?,
-                token: row.get(2)?,
-                user_id: row.get(3)?,
-                username: row.get(4)?,
-                display_name: row.get(5)?,
-                avatar_url: row.get(6)?,
-                software: row.get(7)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM accounts WHERE host = ?1 AND user_id = ?2",
+            Self::ACCOUNT_COLUMNS
+        ))?;
+        let mut rows = stmt.query_map(params![host, user_id], Self::row_to_account)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),

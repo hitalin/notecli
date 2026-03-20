@@ -52,10 +52,8 @@ impl AppState {
     }
 
     fn account_id_for_host(&self, host: &str) -> Result<String, ApiError> {
-        let accounts = self.db.load_accounts()?;
-        accounts
-            .iter()
-            .find(|a| a.host == host)
+        self.db
+            .get_account_by_host(host)?
             .map(|a| a.id.clone())
             .ok_or_else(|| ApiError::not_found(&format!("No account for host: {host}")))
     }
