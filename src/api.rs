@@ -1080,6 +1080,234 @@ impl MisskeyClient {
         Ok(endpoints)
     }
 
+    // --- Notifications ---
+
+    pub async fn get_unread_notification_count(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<i64, NoteDeckError> {
+        let data = self
+            .request(host, token, "notifications/unread-count", json!({}))
+            .await?;
+        Ok(data.get("count").and_then(|v| v.as_i64()).unwrap_or(0))
+    }
+
+    pub async fn mark_all_notifications_as_read(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "notifications/mark-all-as-read", json!({}))
+            .await?;
+        Ok(())
+    }
+
+    // --- Unread chat ---
+
+    pub async fn get_unread_chat(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<bool, NoteDeckError> {
+        let data = self
+            .request(host, token, "messaging/unread", json!({}))
+            .await?;
+        Ok(data.as_bool().unwrap_or(false))
+    }
+
+    // --- Self (current user) ---
+
+    pub async fn get_self(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "i", json!({})).await
+    }
+
+    // --- Drive ---
+
+    pub async fn get_drive_folders(
+        &self,
+        host: &str,
+        token: &str,
+        folder_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "limit": limit });
+        if let Some(id) = folder_id {
+            params["folderId"] = json!(id);
+        }
+        self.request(host, token, "drive/folders", params).await
+    }
+
+    pub async fn get_drive_files(
+        &self,
+        host: &str,
+        token: &str,
+        folder_id: Option<&str>,
+        limit: i64,
+        file_type: Option<&str>,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "limit": limit });
+        if let Some(id) = folder_id {
+            params["folderId"] = json!(id);
+        }
+        if let Some(t) = file_type {
+            params["type"] = json!(t);
+        }
+        self.request(host, token, "drive/files", params).await
+    }
+
+    pub async fn delete_drive_file(
+        &self,
+        host: &str,
+        token: &str,
+        file_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "drive/files/delete", json!({ "fileId": file_id }))
+            .await?;
+        Ok(())
+    }
+
+    // --- Follow requests ---
+
+    pub async fn get_follow_requests(
+        &self,
+        host: &str,
+        token: &str,
+        limit: i64,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "following/requests/list", json!({ "limit": limit }))
+            .await
+    }
+
+    // --- Explore (users/roles) ---
+
+    pub async fn search_users(
+        &self,
+        host: &str,
+        token: &str,
+        query: Option<&str>,
+        origin: Option<&str>,
+        sort: Option<&str>,
+        state: Option<&str>,
+        limit: i64,
+        offset: Option<i64>,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "limit": limit });
+        if let Some(q) = query {
+            params["query"] = json!(q);
+        }
+        if let Some(o) = origin {
+            params["origin"] = json!(o);
+        }
+        if let Some(s) = sort {
+            params["sort"] = json!(s);
+        }
+        if let Some(s) = state {
+            params["state"] = json!(s);
+        }
+        if let Some(o) = offset {
+            params["offset"] = json!(o);
+        }
+        self.request(host, token, "users", params).await
+    }
+
+    pub async fn get_roles(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "roles/list", json!({})).await
+    }
+
+    pub async fn get_role_users(
+        &self,
+        host: &str,
+        token: &str,
+        role_id: &str,
+        limit: i64,
+        offset: Option<i64>,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "roleId": role_id, "limit": limit });
+        if let Some(o) = offset {
+            params["offset"] = json!(o);
+        }
+        self.request(host, token, "roles/users", params).await
+    }
+
+    // --- Announcements ---
+
+    pub async fn get_announcements(
+        &self,
+        host: &str,
+        token: &str,
+        limit: i64,
+        is_active: bool,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "announcements",
+            json!({ "limit": limit, "isActive": is_active }),
+        )
+        .await
+    }
+
+    pub async fn read_announcement(
+        &self,
+        host: &str,
+        token: &str,
+        announcement_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "i/read-announcement",
+            json!({ "announcementId": announcement_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    // --- Chat reactions ---
+
+    pub async fn react_chat_message(
+        &self,
+        host: &str,
+        token: &str,
+        message_id: &str,
+        reaction: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "chat/messages/react",
+            json!({ "messageId": message_id, "reaction": reaction }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn unreact_chat_message(
+        &self,
+        host: &str,
+        token: &str,
+        message_id: &str,
+        reaction: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "chat/messages/unreact",
+            json!({ "messageId": message_id, "reaction": reaction }),
+        )
+        .await?;
+        Ok(())
+    }
+
     // --- Chat API ---
 
     pub async fn get_chat_history(
@@ -1087,9 +1315,14 @@ impl MisskeyClient {
         host: &str,
         token: &str,
         limit: i64,
+        room: bool,
     ) -> Result<Vec<ChatMessage>, NoteDeckError> {
+        let mut params = json!({ "limit": limit });
+        if room {
+            params["room"] = json!(true);
+        }
         let data = self
-            .request(host, token, "chat/history", json!({ "limit": limit }))
+            .request(host, token, "chat/history", params)
             .await?;
         let messages: Vec<ChatMessage> = serde_json::from_value(data)?;
         Ok(messages)
@@ -1185,6 +1418,21 @@ impl MisskeyClient {
         Ok(message)
     }
 
+    // --- Legacy messaging ---
+
+    pub async fn create_messaging_message(
+        &self,
+        host: &str,
+        token: &str,
+        params: Value,
+    ) -> Result<ChatMessage, NoteDeckError> {
+        let data = self
+            .request(host, token, "messaging/messages/create", params)
+            .await?;
+        let message: ChatMessage = serde_json::from_value(data)?;
+        Ok(message)
+    }
+
     // --- Server Discovery (unauthenticated) ---
 
     /// Fetch nodeinfo via .well-known/nodeinfo.
@@ -1252,6 +1500,215 @@ impl MisskeyClient {
         let nodeinfo: Value = serde_json::from_str(&text)?;
         Ok(nodeinfo)
     }
+
+    // --- Pin/Unpin ---
+
+    pub async fn pin_note(
+        &self,
+        host: &str,
+        token: &str,
+        note_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "i/pin", json!({ "noteId": note_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unpin_note(
+        &self,
+        host: &str,
+        token: &str,
+        note_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "i/unpin", json!({ "noteId": note_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_user_pinned_note_ids(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<Vec<String>, NoteDeckError> {
+        let data = self
+            .request(host, token, "users/show", json!({ "userId": user_id }))
+            .await?;
+        let ids = data
+            .get("pinnedNoteIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(ids)
+    }
+
+    // --- Mute/Block ---
+
+    pub async fn mute_user(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "mute/create", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unmute_user(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "mute/delete", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn block_user(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "blocking/create", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unblock_user(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "blocking/delete", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
+    // --- Report ---
+
+    pub async fn report_user(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+        comment: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "users/report-abuse",
+            json!({ "userId": user_id, "comment": comment }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    // --- Clip operations ---
+
+    pub async fn add_note_to_clip(
+        &self,
+        host: &str,
+        token: &str,
+        clip_id: &str,
+        note_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "clips/add-note",
+            json!({ "clipId": clip_id, "noteId": note_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    // --- User list operations ---
+
+    pub async fn add_user_to_list(
+        &self,
+        host: &str,
+        token: &str,
+        list_id: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "users/lists/push",
+            json!({ "listId": list_id, "userId": user_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_user_from_list(
+        &self,
+        host: &str,
+        token: &str,
+        list_id: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "users/lists/pull",
+            json!({ "listId": list_id, "userId": user_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    // --- Follow list & relations ---
+
+    pub async fn get_following(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+        limit: i64,
+        until_id: Option<&str>,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "userId": user_id, "limit": limit });
+        if let Some(id) = until_id {
+            params["untilId"] = json!(id);
+        }
+        self.request(host, token, "users/following", params).await
+    }
+
+    pub async fn get_followers(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+        limit: i64,
+        until_id: Option<&str>,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "userId": user_id, "limit": limit });
+        if let Some(id) = until_id {
+            params["untilId"] = json!(id);
+        }
+        self.request(host, token, "users/followers", params).await
+    }
+
+    pub async fn get_user_relations(
+        &self,
+        host: &str,
+        token: &str,
+        user_ids: &[String],
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "users/relation", json!({ "userId": user_ids }))
+            .await
+    }
+
+    // --- Server Discovery (unauthenticated) ---
 
     /// Fetch server meta (icon URL) via /api/meta (unauthenticated).
     pub async fn fetch_server_meta(&self, host: &str) -> Result<Value, NoteDeckError> {
