@@ -1308,6 +1308,256 @@ impl MisskeyClient {
         Ok(())
     }
 
+    // --- Search ---
+
+    pub async fn search_users_by_query(
+        &self,
+        host: &str,
+        token: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "users/search",
+            json!({ "query": query, "limit": limit }),
+        )
+        .await
+    }
+
+    pub async fn search_hashtags(
+        &self,
+        host: &str,
+        token: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, NoteDeckError> {
+        let data = self
+            .request(
+                host,
+                token,
+                "hashtags/search",
+                json!({ "query": query, "limit": limit }),
+            )
+            .await?;
+        let tags: Vec<String> = serde_json::from_value(data)?;
+        Ok(tags)
+    }
+
+    // --- ActivityPub resolve ---
+
+    pub async fn ap_show(
+        &self,
+        host: &str,
+        token: &str,
+        uri: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "ap/show", json!({ "uri": uri }))
+            .await
+    }
+
+    // --- Server stats ---
+
+    pub async fn get_server_stats(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "stats", json!({})).await
+    }
+
+    pub async fn get_meta_detail(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "meta", json!({ "detail": true }))
+            .await
+    }
+
+    // --- User achievements ---
+
+    pub async fn get_user_achievements(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "users/achievements",
+            json!({ "userId": user_id }),
+        )
+        .await
+    }
+
+    // --- User notes (with filters) ---
+
+    pub async fn get_user_notes_filtered(
+        &self,
+        host: &str,
+        token: &str,
+        params: Value,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "users/notes", params).await
+    }
+
+    pub async fn get_user_featured_notes(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+        limit: i64,
+        until_id: Option<&str>,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "userId": user_id, "limit": limit });
+        if let Some(id) = until_id {
+            params["untilId"] = json!(id);
+        }
+        self.request(host, token, "users/featured-notes", params)
+            .await
+    }
+
+    // --- Pages ---
+
+    pub async fn get_pages(
+        &self,
+        host: &str,
+        token: &str,
+        endpoint: &str,
+        limit: i64,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, endpoint, json!({ "limit": limit }))
+            .await
+    }
+
+    pub async fn get_page(
+        &self,
+        host: &str,
+        token: &str,
+        page_id: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "pages/show", json!({ "pageId": page_id }))
+            .await
+    }
+
+    pub async fn like_page(
+        &self,
+        host: &str,
+        token: &str,
+        page_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "pages/like", json!({ "pageId": page_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unlike_page(
+        &self,
+        host: &str,
+        token: &str,
+        page_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "pages/unlike", json!({ "pageId": page_id }))
+            .await?;
+        Ok(())
+    }
+
+    // --- Gallery ---
+
+    pub async fn get_gallery_posts(
+        &self,
+        host: &str,
+        token: &str,
+        limit: i64,
+        until_id: Option<&str>,
+    ) -> Result<Value, NoteDeckError> {
+        let mut params = json!({ "limit": limit });
+        if let Some(id) = until_id {
+            params["untilId"] = json!(id);
+        }
+        self.request(host, token, "gallery/posts", params).await
+    }
+
+    pub async fn like_gallery_post(
+        &self,
+        host: &str,
+        token: &str,
+        post_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "gallery/posts/like",
+            json!({ "postId": post_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn unlike_gallery_post(
+        &self,
+        host: &str,
+        token: &str,
+        post_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "gallery/posts/unlike",
+            json!({ "postId": post_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    // --- Flash (Play) ---
+
+    pub async fn get_flashes(
+        &self,
+        host: &str,
+        token: &str,
+        endpoint: &str,
+        limit: i64,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, endpoint, json!({ "limit": limit }))
+            .await
+    }
+
+    pub async fn get_flash(
+        &self,
+        host: &str,
+        token: &str,
+        flash_id: &str,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(host, token, "flash/show", json!({ "flashId": flash_id }))
+            .await
+    }
+
+    pub async fn like_flash(
+        &self,
+        host: &str,
+        token: &str,
+        flash_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "flash/like", json!({ "flashId": flash_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unlike_flash(
+        &self,
+        host: &str,
+        token: &str,
+        flash_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "flash/unlike", json!({ "flashId": flash_id }))
+            .await?;
+        Ok(())
+    }
+
     // --- Chat API ---
 
     pub async fn get_chat_history(
