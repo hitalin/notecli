@@ -262,9 +262,9 @@ impl MisskeyClient {
         // i/favorites returns [{ id, note: {...}, ... }]
         let items: Vec<Value> = serde_json::from_value(data)?;
         let mut notes = Vec::with_capacity(items.len());
-        for item in items {
-            if let Some(note_val) = item.get("note") {
-                let raw: RawNote = serde_json::from_value(note_val.clone())?;
+        for mut item in items {
+            if let Some(note_val) = item.get_mut("note").map(Value::take) {
+                let raw: RawNote = serde_json::from_value(note_val)?;
                 notes.push(raw.normalize(account_id, host));
             }
         }
@@ -328,16 +328,15 @@ impl MisskeyClient {
         host: &str,
         token: &str,
     ) -> Result<Vec<Channel>, NoteDeckError> {
-        let limit = json!({"limit": 100});
         let (followed, favorites, owned, featured) = tokio::join!(
-            self.request(host, token, "channels/followed", limit.clone()),
-            self.request(host, token, "channels/my-favorites", limit.clone()),
-            self.request(host, token, "channels/owned", limit.clone()),
+            self.request(host, token, "channels/followed", json!({"limit": 100})),
+            self.request(host, token, "channels/my-favorites", json!({"limit": 100})),
+            self.request(host, token, "channels/owned", json!({"limit": 100})),
             self.request(host, token, "channels/featured", json!({})),
         );
 
-        let mut seen = std::collections::HashSet::new();
-        let mut channels = Vec::new();
+        let mut seen = std::collections::HashSet::with_capacity(128);
+        let mut channels = Vec::with_capacity(128);
 
         // User's own channels first, then featured as fallback
         for data in [followed, favorites, owned, featured].into_iter().flatten() {

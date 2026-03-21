@@ -68,6 +68,24 @@ impl From<&Account> for AccountPublic {
     }
 }
 
+impl From<Account> for AccountPublic {
+    fn from(mut a: Account) -> Self {
+        let has_token = !a.token.is_empty();
+        // Zeroize token before taking fields via clone to maintain security invariant
+        a.token.zeroize();
+        Self {
+            id: std::mem::take(&mut a.id),
+            host: std::mem::take(&mut a.host),
+            user_id: std::mem::take(&mut a.user_id),
+            username: std::mem::take(&mut a.username),
+            display_name: a.display_name.take(),
+            avatar_url: a.avatar_url.take(),
+            software: std::mem::take(&mut a.software),
+            has_token,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredServer {

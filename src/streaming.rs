@@ -766,23 +766,23 @@ async fn handle_ws_message(
     text: &str,
     subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
 ) {
-    let msg: Value = match serde_json::from_str(text) {
+    let mut msg: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
     };
 
-    let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+    let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
 
     // Note Capture: { "type": "noteUpdated", "body": { "id": "...", "type": "...", "body": ... } }
     if msg_type == "noteUpdated" {
-        if let Some(body) = msg.get("body") {
-            let note_id = body.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            let update_type = body.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-            let update_body = body.get("body").cloned().unwrap_or(Value::Null);
+        if let Some(mut body) = msg.get_mut("body").map(Value::take) {
+            let note_id = body.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            let update_type = body.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            let update_body = body.get_mut("body").map(Value::take).unwrap_or_default();
             let payload = StreamNoteCaptureEvent {
                 account_id: account_id.to_string(),
-                note_id: note_id.to_string(),
-                update_type: update_type.to_string(),
+                note_id,
+                update_type,
                 body: update_body,
             };
             event_bus.send(SseEvent {
@@ -799,42 +799,42 @@ async fn handle_ws_message(
         return;
     }
 
-    let body = match msg.get("body") {
-        Some(b) => b,
-        None => return,
+    let mut body = match msg.get_mut("body").map(Value::take) {
+        Some(b) if !b.is_null() => b,
+        _ => return,
     };
 
     let sub_id = match body.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id,
+        Some(id) => id.to_owned(),
         None => return,
     };
 
     let event_type = match body.get("type").and_then(|v| v.as_str()) {
-        Some(t) => t,
+        Some(t) => t.to_owned(),
         None => return,
     };
 
-    let event_body = match body.get("body") {
-        Some(b) => b.clone(),
-        None => return,
+    let event_body = match body.get_mut("body").map(Value::take) {
+        Some(b) if !b.is_null() => b,
+        _ => return,
     };
 
-    let subs = subscriptions.read().await;
-    let info = match subs.get(sub_id) {
-        Some(i) => i.clone(),
-        None => return,
+    let (kind, host, timeline_type) = {
+        let subs = subscriptions.read().await;
+        match subs.get(&sub_id) {
+            Some(i) => (i.kind.clone(), i.host.clone(), i.timeline_type.clone()),
+            None => return,
+        }
     };
-    drop(subs);
 
-    let is_note_channel = matches!(info.kind.as_str(), "timeline" | "antenna" | "channel");
+    let is_note_channel = matches!(kind.as_str(), "timeline" | "antenna" | "channel");
 
     if is_note_channel && event_type == "note" {
         if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
-            let note = raw.normalize(account_id, &info.host);
+            let note = raw.normalize(account_id, &host);
             // Cache to DB asynchronously — don't block the message handler
             let db = db.clone();
             let note_clone = note.clone();
-            let timeline_type = info.timeline_type.clone();
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = db.cache_note(&note_clone, &timeline_type) {
                     tracing::warn!(error = %e, "failed to cache streamed note");
@@ -842,7 +842,7 @@ async fn handle_ws_message(
             });
             let payload = StreamNoteEvent {
                 account_id: account_id.to_string(),
-                subscription_id: sub_id.to_string(),
+                subscription_id: sub_id,
                 note,
             };
             event_bus.send(SseEvent {
@@ -852,14 +852,15 @@ async fn handle_ws_message(
             emit_or_log!(emitter, "stream-note", payload);
         }
     } else if is_note_channel && event_type == "noteUpdated" {
-        let note_id = event_body.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-        let update_type = event_body.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-        let update_body = event_body.get("body").cloned().unwrap_or(Value::Null);
+        let note_id = event_body.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let update_type = event_body.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let mut event_body = event_body;
+        let update_body = event_body.get_mut("body").map(Value::take).unwrap_or_default();
         let payload = StreamNoteUpdatedEvent {
             account_id: account_id.to_string(),
-            subscription_id: sub_id.to_string(),
-            note_id: note_id.to_string(),
-            update_type: update_type.to_string(),
+            subscription_id: sub_id,
+            note_id,
+            update_type,
             body: update_body,
         };
         event_bus.send(SseEvent {
@@ -867,13 +868,13 @@ async fn handle_ws_message(
             data: serde_json::to_value(&payload).unwrap_or_default(),
         });
         emit_or_log!(emitter, "stream-note-updated", payload);
-    } else if info.kind == "main" {
+    } else if kind == "main" {
         if event_type == "notification" {
             if let Ok(raw) = serde_json::from_value::<RawNotification>(event_body) {
-                let notification = raw.normalize(account_id, &info.host);
+                let notification = raw.normalize(account_id, &host);
                 let payload = StreamNotificationEvent {
                     account_id: account_id.to_string(),
-                    subscription_id: sub_id.to_string(),
+                    subscription_id: sub_id,
                     notification,
                 };
                 event_bus.send(SseEvent {
@@ -884,10 +885,10 @@ async fn handle_ws_message(
             }
         } else if event_type == "mention" || event_type == "reply" {
             if let Ok(raw) = serde_json::from_value::<RawNote>(event_body.clone()) {
-                let note = raw.normalize(account_id, &info.host);
+                let note = raw.normalize(account_id, &host);
                 let payload = StreamMentionEvent {
                     account_id: account_id.to_string(),
-                    subscription_id: sub_id.to_string(),
+                    subscription_id: sub_id.clone(),
                     note,
                 };
                 event_bus.send(SseEvent {
@@ -898,15 +899,15 @@ async fn handle_ws_message(
             }
             emit_or_log!(emitter, "stream-main-event", StreamMainEvent {
                 account_id: account_id.to_string(),
-                subscription_id: sub_id.to_string(),
-                event_type: event_type.to_string(),
+                subscription_id: sub_id,
+                event_type,
                 body: event_body,
             });
         } else {
             let payload = StreamMainEvent {
                 account_id: account_id.to_string(),
-                subscription_id: sub_id.to_string(),
-                event_type: event_type.to_string(),
+                subscription_id: sub_id,
+                event_type,
                 body: event_body,
             };
             event_bus.send(SseEvent {
@@ -915,12 +916,12 @@ async fn handle_ws_message(
             });
             emit_or_log!(emitter, "stream-main-event", payload);
         }
-    } else if info.kind == "chat" {
+    } else if kind == "chat" {
         if event_type == "message" {
             if let Ok(msg) = serde_json::from_value::<ChatMessage>(event_body) {
                 let payload = StreamChatMessageEvent {
                     account_id: account_id.to_string(),
-                    subscription_id: sub_id.to_string(),
+                    subscription_id: sub_id,
                     message: msg,
                 };
                 event_bus.send(SseEvent {
@@ -933,7 +934,7 @@ async fn handle_ws_message(
             if let Some(id) = event_body.as_str() {
                 let payload = StreamChatMessageDeletedEvent {
                     account_id: account_id.to_string(),
-                    subscription_id: sub_id.to_string(),
+                    subscription_id: sub_id,
                     message_id: id.to_string(),
                 };
                 event_bus.send(SseEvent {

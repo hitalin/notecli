@@ -246,7 +246,7 @@ async fn get_timeline(
     State(state): State<AppState>,
     Path((host, tl_type)): Path<(String, String)>,
     Query(opts): Query<TimelineQueryParams>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Vec<crate::models::NormalizedNote>>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let options = opts.into_timeline_options();
@@ -255,14 +255,14 @@ async fn get_timeline(
         .client
         .get_timeline(&h, &token, &account_id, tl, options)
         .await?;
-    Ok(Json(serde_json::to_value(notes).unwrap_or_default()))
+    Ok(Json(notes))
 }
 
 async fn get_notifications(
     State(state): State<AppState>,
     Path(host): Path<String>,
     Query(opts): Query<TimelineQueryParams>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Vec<crate::models::NormalizedNotification>>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let options = opts.into_timeline_options();
@@ -270,14 +270,14 @@ async fn get_notifications(
         .client
         .get_notifications(&h, &token, &account_id, options)
         .await?;
-    Ok(Json(serde_json::to_value(notifications).unwrap_or_default()))
+    Ok(Json(notifications))
 }
 
 async fn create_note(
     State(state): State<AppState>,
     Path(host): Path<String>,
     Json(body): Json<CreateNoteBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::models::NormalizedNote>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let params = CreateNoteParams {
@@ -296,14 +296,14 @@ async fn create_note(
         .client
         .create_note(&h, &token, &account_id, params)
         .await?;
-    Ok(Json(serde_json::to_value(note).unwrap_or_default()))
+    Ok(Json(note))
 }
 
 async fn search_notes(
     State(state): State<AppState>,
     Path(host): Path<String>,
     Query(params): Query<SearchQueryParams>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Vec<crate::models::NormalizedNote>>, ApiError> {
     let query = params.q.unwrap_or_default();
     if query.is_empty() {
         return Err(ApiError {
@@ -318,20 +318,20 @@ async fn search_notes(
         .client
         .search_notes(&h, &token, &account_id, &query, Default::default())
         .await?;
-    Ok(Json(serde_json::to_value(notes).unwrap_or_default()))
+    Ok(Json(notes))
 }
 
 async fn get_note(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::models::NormalizedNote>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let note = state
         .client
         .get_note(&h, &token, &account_id, &note_id)
         .await?;
-    Ok(Json(serde_json::to_value(note).unwrap_or_default()))
+    Ok(Json(note))
 }
 
 async fn delete_note(
@@ -348,7 +348,7 @@ async fn get_note_children(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
     Query(opts): Query<LimitQueryParams>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Vec<crate::models::NormalizedNote>>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let limit = opts.limit.unwrap_or(20);
@@ -356,14 +356,14 @@ async fn get_note_children(
         .client
         .get_note_children(&h, &token, &account_id, &note_id, limit)
         .await?;
-    Ok(Json(serde_json::to_value(notes).unwrap_or_default()))
+    Ok(Json(notes))
 }
 
 async fn get_note_conversation(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
     Query(opts): Query<LimitQueryParams>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Vec<crate::models::NormalizedNote>>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let limit = opts.limit.unwrap_or(20);
@@ -371,14 +371,14 @@ async fn get_note_conversation(
         .client
         .get_note_conversation(&h, &token, &account_id, &note_id, limit)
         .await?;
-    Ok(Json(serde_json::to_value(notes).unwrap_or_default()))
+    Ok(Json(notes))
 }
 
 async fn get_note_reactions(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
     Query(opts): Query<ReactionQueryParams>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Vec<crate::models::NormalizedNoteReaction>>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let limit = opts.limit.unwrap_or(20);
@@ -386,7 +386,7 @@ async fn get_note_reactions(
         .client
         .get_note_reactions(&h, &token, &note_id, opts.r#type.as_deref(), limit)
         .await?;
-    Ok(Json(serde_json::to_value(reactions).unwrap_or_default()))
+    Ok(Json(reactions))
 }
 
 async fn create_reaction(
@@ -419,21 +419,21 @@ async fn delete_reaction(
 async fn get_user(
     State(state): State<AppState>,
     Path((host, user_id)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::models::NormalizedUserDetail>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let user = state
         .client
         .get_user_detail(&h, &token, &user_id)
         .await?;
-    Ok(Json(serde_json::to_value(user).unwrap_or_default()))
+    Ok(Json(user))
 }
 
 async fn get_user_notes(
     State(state): State<AppState>,
     Path((host, user_id)): Path<(String, String)>,
     Query(opts): Query<TimelineQueryParams>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<Vec<crate::models::NormalizedNote>>, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let options = opts.into_timeline_options();
@@ -441,7 +441,7 @@ async fn get_user_notes(
         .client
         .get_user_notes(&h, &token, &account_id, &user_id, options)
         .await?;
-    Ok(Json(serde_json::to_value(notes).unwrap_or_default()))
+    Ok(Json(notes))
 }
 
 async fn sse_events(

@@ -80,9 +80,6 @@ impl Database {
 
     // --- Accounts ---
 
-    const ACCOUNT_COLUMNS: &str =
-        "id, host, token, user_id, username, display_name, avatar_url, software";
-
     fn row_to_account(row: &rusqlite::Row) -> rusqlite::Result<Account> {
         Ok(Account {
             id: row.get(0)?,
@@ -98,10 +95,9 @@ impl Database {
 
     pub fn load_accounts(&self) -> Result<Vec<Account>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM accounts ORDER BY rowid",
-            Self::ACCOUNT_COLUMNS
-        ))?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts ORDER BY rowid",
+        )?;
         let rows = stmt.query_map([], Self::row_to_account)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -133,10 +129,9 @@ impl Database {
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM accounts WHERE id = ?1",
-            Self::ACCOUNT_COLUMNS
-        ))?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts WHERE id = ?1",
+        )?;
         let mut rows = stmt.query_map(params![id], Self::row_to_account)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
@@ -146,10 +141,9 @@ impl Database {
 
     pub fn get_account_by_host(&self, host: &str) -> Result<Option<Account>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM accounts WHERE host = ?1 LIMIT 1",
-            Self::ACCOUNT_COLUMNS
-        ))?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts WHERE host = ?1 LIMIT 1",
+        )?;
         let mut rows = stmt.query_map(params![host], Self::row_to_account)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
@@ -163,10 +157,9 @@ impl Database {
         user_id: &str,
     ) -> Result<Option<Account>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM accounts WHERE host = ?1 AND user_id = ?2",
-            Self::ACCOUNT_COLUMNS
-        ))?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts WHERE host = ?1 AND user_id = ?2",
+        )?;
         let mut rows = stmt.query_map(params![host, user_id], Self::row_to_account)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
@@ -191,8 +184,9 @@ impl Database {
 
     pub fn load_servers(&self) -> Result<Vec<StoredServer>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare("SELECT host, software, version, features_json, updated_at FROM servers")?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT host, software, version, features_json, updated_at FROM servers",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok(StoredServer {
                 host: row.get(0)?,
@@ -207,7 +201,7 @@ impl Database {
 
     pub fn get_server(&self, host: &str) -> Result<Option<StoredServer>, NoteDeckError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT host, software, version, features_json, updated_at FROM servers WHERE host = ?1",
         )?;
         let mut rows = stmt.query_map(params![host], |row| {
@@ -551,7 +545,7 @@ impl Database {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT url, title, description, image, site_name, icon, player_url, player_width, player_height, player_allow, final_url, sensitive, medias_json
              FROM ogp_cache WHERE expires_at > ?1 LIMIT ?2",
         )?;
