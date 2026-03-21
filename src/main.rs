@@ -66,7 +66,10 @@ async fn run_daemon(port: u16) {
     let emitter = Arc::new(EventBusEmitter::new(event_bus.clone()));
     let _streaming = StreamingManager::new(emitter, event_bus.clone(), db.clone());
 
-    let api_token = uuid::Uuid::new_v4().to_string();
+    let api_token: String = rand::random::<[u8; 32]>()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let token_path = data_dir.join("api-token");
     std::fs::write(&token_path, &api_token).expect("Failed to write API token");
     #[cfg(unix)]

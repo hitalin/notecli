@@ -9,6 +9,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use subtle::ConstantTimeEq;
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -201,8 +202,13 @@ async fn auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match token {
-        Some(t) if t == state.api_token => Ok(next.run(req).await),
-        _ => Err(ApiError::unauthorized().into_response()),
+        Some(t) if bool::from(t.as_bytes().ct_eq(state.api_token.as_bytes())) => {
+            Ok(next.run(req).await)
+        }
+        _ => {
+            tracing::warn!(uri = %req.uri(), "unauthorized API access attempt");
+            Err(ApiError::unauthorized().into_response())
+        }
     }
 }
 
