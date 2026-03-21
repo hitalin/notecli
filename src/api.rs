@@ -1934,6 +1934,147 @@ impl MisskeyClient {
         let meta: Value = serde_json::from_str(&text)?;
         Ok(meta)
     }
+
+    // --- Anonymous (token-free) API methods ---
+
+    /// Send a request without authentication token.
+    /// Used for public endpoints (users/show, notes/show, etc.)
+    pub async fn request_anonymous(
+        &self,
+        host: &str,
+        endpoint: &str,
+        params: Value,
+    ) -> Result<Value, NoteDeckError> {
+        let res = self
+            .client
+            .post(self.api_url(host, endpoint))
+            .json(&params)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let detail = match res.json::<Value>().await {
+                Ok(body) => body
+                    .pointer("/error/message")
+                    .or_else(|| body.pointer("/error/code"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                Err(_) => None,
+            };
+            let message = match detail {
+                Some(d) => format!("{endpoint}: {d}"),
+                None => format!("{endpoint} ({status})"),
+            };
+            return Err(NoteDeckError::Api {
+                endpoint: endpoint.to_string(),
+                status,
+                message,
+            });
+        }
+
+        let text = Self::read_body_limited(res, endpoint).await?;
+        if text.is_empty() {
+            Ok(Value::Null)
+        } else {
+            serde_json::from_str(&text).map_err(NoteDeckError::from)
+        }
+    }
+
+    pub async fn get_timeline_anonymous(
+        &self,
+        host: &str,
+        account_id: &str,
+        timeline_type: TimelineType,
+        options: TimelineOptions,
+    ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
+        let endpoint = timeline_type.api_endpoint();
+        let mut params = json!({ "limit": options.limit() });
+        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        if let Some(ref f) = options.filters {
+            if let Some(v) = f.with_renotes {
+                params["withRenotes"] = json!(v);
+            }
+            if let Some(v) = f.with_replies {
+                params["withReplies"] = json!(v);
+            }
+            if let Some(v) = f.with_files {
+                params["withFiles"] = json!(v);
+            }
+            if let Some(v) = f.with_bots {
+                params["withBots"] = json!(v);
+                params["excludeBots"] = json!(!v);
+            }
+            if let Some(v) = f.with_sensitive {
+                params["withSensitive"] = json!(v);
+                params["excludeNsfw"] = json!(!v);
+            }
+        }
+        if let Some(ref id) = options.list_id {
+            params["listId"] = json!(id);
+        }
+
+        let data = self.request_anonymous(host, &endpoint, params).await?;
+        let raw: Vec<RawNote> = serde_json::from_value(data)?;
+        Ok(raw
+            .into_iter()
+            .map(|n| n.normalize(account_id, host))
+            .collect())
+    }
+
+    pub async fn get_user_anonymous(
+        &self,
+        host: &str,
+        user_id: &str,
+    ) -> Result<NormalizedUser, NoteDeckError> {
+        let data = self
+            .request_anonymous(host, "users/show", json!({ "userId": user_id }))
+            .await?;
+        let raw: RawUser = serde_json::from_value(data)?;
+        Ok(raw.into())
+    }
+
+    pub async fn get_user_detail_anonymous(
+        &self,
+        host: &str,
+        user_id: &str,
+    ) -> Result<NormalizedUserDetail, NoteDeckError> {
+        let data = self
+            .request_anonymous(host, "users/show", json!({ "userId": user_id }))
+            .await?;
+        let raw: RawUserDetail = serde_json::from_value(data)?;
+        Ok(raw.normalize())
+    }
+
+    pub async fn get_user_notes_anonymous(
+        &self,
+        host: &str,
+        account_id: &str,
+        user_id: &str,
+        options: TimelineOptions,
+    ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
+        let mut params = json!({ "userId": user_id, "limit": options.limit() });
+        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        let data = self.request_anonymous(host, "users/notes", params).await?;
+        let raw: Vec<RawNote> = serde_json::from_value(data)?;
+        Ok(raw
+            .into_iter()
+            .map(|n| n.normalize(account_id, host))
+            .collect())
+    }
+
+    pub async fn get_note_anonymous(
+        &self,
+        host: &str,
+        account_id: &str,
+        note_id: &str,
+    ) -> Result<NormalizedNote, NoteDeckError> {
+        let data = self
+            .request_anonymous(host, "notes/show", json!({ "noteId": note_id }))
+            .await?;
+        let raw: RawNote = serde_json::from_value(data)?;
+        Ok(raw.normalize(account_id, host))
+    }
 }
 
 #[cfg(test)]
