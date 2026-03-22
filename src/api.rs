@@ -330,18 +330,28 @@ impl MisskeyClient {
         host: &str,
         token: &str,
     ) -> Result<Vec<Channel>, NoteDeckError> {
-        let (followed, favorites, owned, featured) = tokio::join!(
-            self.request(host, token, "channels/followed", json!({"limit": 100})),
-            self.request(host, token, "channels/my-favorites", json!({"limit": 100})),
-            self.request(host, token, "channels/owned", json!({"limit": 100})),
-            self.request(host, token, "channels/featured", json!({})),
-        );
+        let search_fut = self.request(host, token, "channels/search", json!({"query": "", "limit": 100}));
+        let featured_fut = self.request(host, token, "channels/featured", json!({}));
+
+        let (followed, favorites, owned, featured, search) = if token.is_empty() {
+            let (fe, s) = tokio::join!(featured_fut, search_fut);
+            (None, None, None, Some(fe), Some(s))
+        } else {
+            let (fo, fa, o, fe, s) = tokio::join!(
+                self.request(host, token, "channels/followed", json!({"limit": 100})),
+                self.request(host, token, "channels/my-favorites", json!({"limit": 100})),
+                self.request(host, token, "channels/owned", json!({"limit": 100})),
+                featured_fut,
+                search_fut,
+            );
+            (Some(fo), Some(fa), Some(o), Some(fe), Some(s))
+        };
 
         let mut seen = std::collections::HashSet::with_capacity(128);
         let mut channels = Vec::with_capacity(128);
 
-        // User's own channels first, then featured as fallback
-        for data in [followed, favorites, owned, featured].into_iter().flatten() {
+        // User's own channels first, then public channels
+        for data in [followed, favorites, owned, featured, search].into_iter().flatten().flatten() {
             if let Ok(list) = serde_json::from_value::<Vec<Channel>>(data) {
                 for ch in list {
                     if seen.insert(ch.id.clone()) {
