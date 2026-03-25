@@ -311,6 +311,8 @@ pub struct NormalizedNotification {
     pub reaction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub achievement: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -671,6 +673,7 @@ pub struct RawNotification {
     pub note: Option<RawNote>,
     pub reaction: Option<String>,
     pub message: Option<String>,
+    pub achievement: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -968,6 +971,7 @@ impl RawNotification {
             note: self.note.map(|n| n.normalize(account_id, server_host)),
             reaction: self.reaction,
             message: self.message,
+            achievement: self.achievement,
         }
     }
 }
