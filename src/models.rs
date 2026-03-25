@@ -297,6 +297,13 @@ pub struct NormalizedDriveFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReactionInfo {
+    pub user: NormalizedUser,
+    pub reaction: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NormalizedNotification {
     pub id: String,
     #[serde(rename = "_accountId")]
@@ -313,6 +320,12 @@ pub struct NormalizedNotification {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub achievement: Option<String>,
+    /// Grouped reactions (for reaction:grouped type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactions: Option<Vec<ReactionInfo>>,
+    /// Grouped users (for renote:grouped type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub users: Option<Vec<NormalizedUser>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -664,6 +677,13 @@ pub struct RawDriveFile {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RawReactionInfo {
+    pub user: RawUser,
+    pub reaction: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RawNotification {
     pub id: String,
     pub created_at: String,
@@ -674,6 +694,10 @@ pub struct RawNotification {
     pub reaction: Option<String>,
     pub message: Option<String>,
     pub achievement: Option<String>,
+    /// Grouped reactions (for reaction:grouped type from notifications-grouped API)
+    pub reactions: Option<Vec<RawReactionInfo>>,
+    /// Grouped users (for renote:grouped type from notifications-grouped API)
+    pub users: Option<Vec<RawUser>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -972,6 +996,17 @@ impl RawNotification {
             reaction: self.reaction,
             message: self.message,
             achievement: self.achievement,
+            reactions: self.reactions.map(|rs| {
+                rs.into_iter()
+                    .map(|r| ReactionInfo {
+                        user: r.user.into(),
+                        reaction: r.reaction,
+                    })
+                    .collect()
+            }),
+            users: self
+                .users
+                .map(|us| us.into_iter().map(Into::into).collect()),
         }
     }
 }

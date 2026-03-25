@@ -771,6 +771,25 @@ impl MisskeyClient {
             .collect())
     }
 
+    pub async fn get_notifications_grouped(
+        &self,
+        host: &str,
+        token: &str,
+        account_id: &str,
+        options: TimelineOptions,
+    ) -> Result<Vec<NormalizedNotification>, NoteDeckError> {
+        let mut params = json!({ "limit": options.limit() });
+        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        let data = self
+            .request(host, token, "i/notifications-grouped", params)
+            .await?;
+        let raw: Vec<RawNotification> = serde_json::from_value(data)?;
+        Ok(raw
+            .into_iter()
+            .map(|n| n.normalize(account_id, host))
+            .collect())
+    }
+
     // --- Auth ---
 
     pub async fn complete_auth(
