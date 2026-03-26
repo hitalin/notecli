@@ -35,7 +35,14 @@ pub struct Database {
 impl Database {
     pub fn open(path: &Path) -> Result<Self, NoteDeckError> {
         let mut conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;\
+             PRAGMA foreign_keys=ON;\
+             PRAGMA synchronous=NORMAL;\
+             PRAGMA mmap_size=268435456;\
+             PRAGMA cache_size=-16000;\
+             PRAGMA temp_store=MEMORY;",
+        )?;
 
         // Run numbered migrations (V1, V2, ...)
         embedded::migrations::runner().run(&mut conn).map_err(|e| {
