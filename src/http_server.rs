@@ -390,7 +390,7 @@ async fn get_note_reactions(
     let limit = opts.limit.unwrap_or(20);
     let reactions = state
         .client
-        .get_note_reactions(&h, &token, &note_id, opts.r#type.as_deref(), limit)
+        .get_note_reactions(&h, &token, &note_id, opts.r#type.as_deref(), limit, opts.until_id.as_deref())
         .await?;
     Ok(Json(reactions))
 }
@@ -514,6 +514,7 @@ struct LimitQueryParams {
 struct ReactionQueryParams {
     r#type: Option<String>,
     limit: Option<u32>,
+    until_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

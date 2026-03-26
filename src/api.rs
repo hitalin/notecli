@@ -518,10 +518,14 @@ impl MisskeyClient {
         note_id: &str,
         reaction_type: Option<&str>,
         limit: u32,
+        until_id: Option<&str>,
     ) -> Result<Vec<NormalizedNoteReaction>, NoteDeckError> {
         let mut params = json!({ "noteId": note_id, "limit": limit });
         if let Some(rt) = reaction_type {
             params["type"] = json!(rt);
+        }
+        if let Some(uid) = until_id {
+            params["untilId"] = json!(uid);
         }
         let data = self.request(host, token, "notes/reactions", params).await?;
         let raw: Vec<RawNoteReaction> = serde_json::from_value(data)?;
