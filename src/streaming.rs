@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -192,6 +192,8 @@ pub struct StreamingManager {
     connections: Arc<Mutex<HashMap<String, ConnectionHandle>>>,
     poll_connections: Arc<Mutex<HashMap<String, PollingHandle>>>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
+    /// Note IDs being captured per account (for polling mode note updates).
+    captured_notes: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     emitter: Arc<dyn FrontendEmitter>,
     event_bus: Arc<EventBus>,
     db: Arc<Database>,
@@ -208,6 +210,7 @@ impl StreamingManager {
             connections: Arc::new(Mutex::new(HashMap::new())),
             poll_connections: Arc::new(Mutex::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            captured_notes: Arc::new(RwLock::new(HashMap::new())),
             emitter,
             event_bus,
             db,
@@ -381,6 +384,7 @@ impl StreamingManager {
         let event_bus = self.event_bus.clone();
         let db = self.db.clone();
         let api_client = self.api_client.clone();
+        let captured_notes = self.captured_notes.clone();
 
         let task = tokio::spawn(async move {
             polling_loop(
@@ -393,6 +397,7 @@ impl StreamingManager {
                 token_owned,
                 interval,
                 subscriptions,
+                captured_notes,
                 cancel_rx,
             )
             .await;
@@ -586,8 +591,7 @@ impl StreamingManager {
     }
 
     pub async fn sub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
-        // In polling mode, note capture is handled by polling loop (PR 3)
-        // For now, only send to WebSocket if connected
+        // WebSocket mode: send subNote command
         let conns = self.connections.lock().await;
         if let Some(handle) = conns.get(account_id) {
             return handle
@@ -595,16 +599,32 @@ impl StreamingManager {
                 .send(WsCommand::SubNote { id: note_id.to_string() })
                 .map_err(|_| NoteDeckError::ConnectionClosed);
         }
+        drop(conns);
+
+        // Polling mode: add to captured_notes set for batch polling
+        let mut captured = self.captured_notes.write().await;
+        captured
+            .entry(account_id.to_string())
+            .or_default()
+            .insert(note_id.to_string());
         Ok(())
     }
 
     pub async fn unsub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
+        // WebSocket mode
         let conns = self.connections.lock().await;
         if let Some(handle) = conns.get(account_id) {
             return handle
                 .cmd_tx
                 .send(WsCommand::UnsubNote { id: note_id.to_string() })
                 .map_err(|_| NoteDeckError::ConnectionClosed);
+        }
+        drop(conns);
+
+        // Polling mode: remove from captured_notes
+        let mut captured = self.captured_notes.write().await;
+        if let Some(set) = captured.get_mut(account_id) {
+            set.remove(note_id);
         }
         Ok(())
     }
@@ -1112,10 +1132,14 @@ async fn polling_loop(
     token: String,
     interval: Duration,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
+    captured_notes: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut sub_states: HashMap<String, PollSubState> = HashMap::new();
+    // Cached reaction counts for captured notes (for diff detection).
+    let mut note_reaction_cache: HashMap<String, HashMap<String, i64>> = HashMap::new();
     let mut consecutive_failures: u64 = 0;
+    let mut poll_count: u64 = 0;
 
     loop {
         // Check cancellation
@@ -1195,6 +1219,96 @@ async fn polling_loop(
                         "polling fetch failed"
                     );
                     poll_failed = true;
+                }
+            }
+        }
+
+        // Note capture: poll every 2nd cycle (2x interval)
+        poll_count += 1;
+        if poll_count % 2 == 0 {
+            let note_ids: Vec<String> = {
+                let captured = captured_notes.read().await;
+                captured
+                    .get(&account_id)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default()
+            };
+
+            // Fetch in batches of 3 to avoid overwhelming the server
+            for chunk in note_ids.chunks(3) {
+                let futures: Vec<_> = chunk
+                    .iter()
+                    .map(|note_id| {
+                        let api = api_client.clone();
+                        let host = host.clone();
+                        let token = token.clone();
+                        let account_id = account_id.clone();
+                        let note_id = note_id.clone();
+                        async move {
+                            let result = api
+                                .get_note(&host, &token, &account_id, &note_id)
+                                .await;
+                            (note_id, result)
+                        }
+                    })
+                    .collect();
+
+                let results = futures_util::future::join_all(futures).await;
+
+                for (note_id, result) in results {
+                    if let Ok(note) = result {
+                        // Diff reactions against cache
+                        let new_reactions = note.reactions.clone();
+
+                        let old_reactions = note_reaction_cache
+                            .get(&note_id)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        // Find new/increased reactions
+                        for (reaction, &new_count) in &new_reactions {
+                            let old_count = old_reactions.get(reaction).copied().unwrap_or(0);
+                            if new_count > old_count {
+                                let payload = StreamNoteCaptureEvent {
+                                    account_id: account_id.clone(),
+                                    note_id: note_id.clone(),
+                                    update_type: "reacted".to_string(),
+                                    body: json!({
+                                        "reaction": reaction,
+                                        "emoji": null,
+                                        "userId": null,
+                                    }),
+                                };
+                                emit_or_log!(
+                                    emitter,
+                                    "stream-note-capture-updated",
+                                    payload
+                                );
+                            }
+                        }
+
+                        // Find removed reactions
+                        for (reaction, _) in &old_reactions {
+                            if !new_reactions.contains_key(reaction) {
+                                let payload = StreamNoteCaptureEvent {
+                                    account_id: account_id.clone(),
+                                    note_id: note_id.clone(),
+                                    update_type: "unreacted".to_string(),
+                                    body: json!({
+                                        "reaction": reaction,
+                                        "userId": null,
+                                    }),
+                                };
+                                emit_or_log!(
+                                    emitter,
+                                    "stream-note-capture-updated",
+                                    payload
+                                );
+                            }
+                        }
+
+                        note_reaction_cache.insert(note_id, new_reactions);
+                    }
                 }
             }
         }
