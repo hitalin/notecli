@@ -9,11 +9,13 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::api::MisskeyClient;
 use crate::db::Database;
 use crate::error::NoteDeckError;
 use crate::event_bus::{EventBus, SseEvent};
 use crate::models::{
     ChatMessage, NormalizedNote, NormalizedNotification, RawNote, RawNotification, TimelineType,
+    TimelineOptions,
 };
 
 /// Trait for emitting events to a frontend (e.g., Tauri WebView).
@@ -161,6 +163,15 @@ struct ConnectionHandle {
     host: String,
 }
 
+/// Handle for a polling task (non-WebSocket mode).
+#[allow(dead_code)]
+struct PollingHandle {
+    task: tokio::task::JoinHandle<()>,
+    cancel: tokio::sync::watch::Sender<bool>,
+    host: String,
+    token: String,
+}
+
 // --- Subscription tracking ---
 
 #[derive(Debug, Clone)]
@@ -179,10 +190,12 @@ struct SubscriptionInfo {
 
 pub struct StreamingManager {
     connections: Arc<Mutex<HashMap<String, ConnectionHandle>>>,
+    poll_connections: Arc<Mutex<HashMap<String, PollingHandle>>>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
     emitter: Arc<dyn FrontendEmitter>,
     event_bus: Arc<EventBus>,
     db: Arc<Database>,
+    api_client: Arc<MisskeyClient>,
 }
 
 impl StreamingManager {
@@ -193,10 +206,12 @@ impl StreamingManager {
     ) -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
+            poll_connections: Arc::new(Mutex::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             emitter,
             event_bus,
             db,
+            api_client: Arc::new(MisskeyClient::new().expect("failed to create HTTP client")),
         }
     }
 
@@ -263,6 +278,7 @@ impl StreamingManager {
     }
 
     pub async fn disconnect(&self, account_id: &str) {
+        // Stop WebSocket connection if any
         let mut conns = self.connections.lock().await;
         if let Some(handle) = conns.remove(account_id) {
             if let Err(e) = handle.cmd_tx.send(WsCommand::Shutdown) {
@@ -272,6 +288,15 @@ impl StreamingManager {
                 tracing::error!(account_id, error = %e, "task join error");
             }
         }
+        drop(conns);
+
+        // Stop polling task if any
+        let mut polls = self.poll_connections.lock().await;
+        if let Some(handle) = polls.remove(account_id) {
+            let _ = handle.cancel.send(true);
+            handle.task.abort();
+        }
+        drop(polls);
 
         // Remove all subscriptions for this account
         let mut subs = self.subscriptions.write().await;
@@ -281,6 +306,107 @@ impl StreamingManager {
             account_id: account_id.to_string(),
             state: "disconnected".to_string(),
         });
+    }
+
+    /// Switch between realtime (WebSocket) and polling (HTTP) mode.
+    /// Subscriptions are preserved across the switch.
+    pub async fn set_mode(
+        &self,
+        account_id: &str,
+        host: &str,
+        token: &str,
+        mode: &str,
+        interval_ms: Option<u64>,
+    ) -> Result<(), NoteDeckError> {
+        match mode {
+            "realtime" => {
+                // Stop polling if active
+                {
+                    let mut polls = self.poll_connections.lock().await;
+                    if let Some(handle) = polls.remove(account_id) {
+                        let _ = handle.cancel.send(true);
+                        handle.task.abort();
+                    }
+                }
+                // Start WebSocket (connect is idempotent)
+                self.connect(account_id, host, token).await?;
+            }
+            "polling" => {
+                // Stop WebSocket if active (but keep subscriptions)
+                {
+                    let mut conns = self.connections.lock().await;
+                    if let Some(handle) = conns.remove(account_id) {
+                        let _ = handle.cmd_tx.send(WsCommand::Shutdown);
+                        let _ = handle.task.await;
+                    }
+                }
+                // Start polling task
+                let interval = Duration::from_millis(interval_ms.unwrap_or(15_000));
+                self.start_polling(account_id, host, token, interval).await;
+
+                emit_or_log!(self.emitter, "stream-status", StreamStatusEvent {
+                    account_id: account_id.to_string(),
+                    state: "connected".to_string(),
+                });
+            }
+            _ => {
+                return Err(NoteDeckError::InvalidInput(format!("unknown mode: {mode}")));
+            }
+        }
+        Ok(())
+    }
+
+    async fn start_polling(
+        &self,
+        account_id: &str,
+        host: &str,
+        token: &str,
+        interval: Duration,
+    ) {
+        let mut polls = self.poll_connections.lock().await;
+
+        // Stop existing polling task
+        if let Some(handle) = polls.remove(account_id) {
+            let _ = handle.cancel.send(true);
+            handle.task.abort();
+        }
+
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let account_id_owned = account_id.to_string();
+        let host_owned = host.to_string();
+        let token_owned = token.to_string();
+        let subscriptions = self.subscriptions.clone();
+        let emitter = self.emitter.clone();
+        let event_bus = self.event_bus.clone();
+        let db = self.db.clone();
+        let api_client = self.api_client.clone();
+
+        let task = tokio::spawn(async move {
+            polling_loop(
+                api_client,
+                emitter,
+                event_bus,
+                db,
+                account_id_owned,
+                host_owned,
+                token_owned,
+                interval,
+                subscriptions,
+                cancel_rx,
+            )
+            .await;
+        });
+
+        polls.insert(
+            account_id.to_string(),
+            PollingHandle {
+                task,
+                cancel: cancel_tx,
+                host: host.to_string(),
+                token: token.to_string(),
+            },
+        );
     }
 
     pub async fn subscribe_timeline(
@@ -443,20 +569,16 @@ impl StreamingManager {
     }
 
     pub async fn unsubscribe(&self, account_id: &str, subscription_id: &str) -> Result<(), NoteDeckError> {
+        // Send unsubscribe to WebSocket if in realtime mode
         let conns = self.connections.lock().await;
-        let handle = conns
-            .get(account_id)
-            .ok_or_else(|| NoteDeckError::NoConnection(account_id.to_string()))?;
-
-        handle
-            .cmd_tx
-            .send(WsCommand::Unsubscribe {
+        if let Some(handle) = conns.get(account_id) {
+            let _ = handle.cmd_tx.send(WsCommand::Unsubscribe {
                 id: subscription_id.to_string(),
-            })
-            .map_err(|_| NoteDeckError::ConnectionClosed)?;
-
+            });
+        }
         drop(conns);
 
+        // Always remove from subscriptions map (both modes use it)
         let mut subs = self.subscriptions.write().await;
         subs.remove(subscription_id);
 
@@ -464,33 +586,44 @@ impl StreamingManager {
     }
 
     pub async fn sub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
+        // In polling mode, note capture is handled by polling loop (PR 3)
+        // For now, only send to WebSocket if connected
         let conns = self.connections.lock().await;
-        let handle = conns
-            .get(account_id)
-            .ok_or_else(|| NoteDeckError::NoConnection(account_id.to_string()))?;
-        handle
-            .cmd_tx
-            .send(WsCommand::SubNote { id: note_id.to_string() })
-            .map_err(|_| NoteDeckError::ConnectionClosed)
+        if let Some(handle) = conns.get(account_id) {
+            return handle
+                .cmd_tx
+                .send(WsCommand::SubNote { id: note_id.to_string() })
+                .map_err(|_| NoteDeckError::ConnectionClosed);
+        }
+        Ok(())
     }
 
     pub async fn unsub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
         let conns = self.connections.lock().await;
-        let handle = conns
-            .get(account_id)
-            .ok_or_else(|| NoteDeckError::NoConnection(account_id.to_string()))?;
-        handle
-            .cmd_tx
-            .send(WsCommand::UnsubNote { id: note_id.to_string() })
-            .map_err(|_| NoteDeckError::ConnectionClosed)
+        if let Some(handle) = conns.get(account_id) {
+            return handle
+                .cmd_tx
+                .send(WsCommand::UnsubNote { id: note_id.to_string() })
+                .map_err(|_| NoteDeckError::ConnectionClosed);
+        }
+        Ok(())
     }
 
     async fn get_host(&self, account_id: &str) -> Result<String, NoteDeckError> {
+        // Check WebSocket connections first
         let conns = self.connections.lock().await;
-        conns
-            .get(account_id)
-            .map(|h| h.host.clone())
-            .ok_or_else(|| NoteDeckError::NoConnection(account_id.to_string()))
+        if let Some(h) = conns.get(account_id) {
+            return Ok(h.host.clone());
+        }
+        drop(conns);
+
+        // Check polling connections
+        let polls = self.poll_connections.lock().await;
+        if let Some(h) = polls.get(account_id) {
+            return Ok(h.host.clone());
+        }
+
+        Err(NoteDeckError::NoConnection(account_id.to_string()))
     }
 
     async fn send_subscribe(
@@ -501,18 +634,27 @@ impl StreamingManager {
         params: Option<Value>,
     ) -> Result<(), NoteDeckError> {
         let conns = self.connections.lock().await;
-        let handle = conns
-            .get(account_id)
-            .ok_or_else(|| NoteDeckError::NoConnection(account_id.to_string()))?;
+        if let Some(handle) = conns.get(account_id) {
+            // WebSocket mode: send subscribe command
+            return handle
+                .cmd_tx
+                .send(WsCommand::Subscribe {
+                    channel: channel.to_string(),
+                    id: sub_id.to_string(),
+                    params,
+                })
+                .map_err(|_| NoteDeckError::ConnectionClosed);
+        }
+        drop(conns);
 
-        handle
-            .cmd_tx
-            .send(WsCommand::Subscribe {
-                channel: channel.to_string(),
-                id: sub_id.to_string(),
-                params,
-            })
-            .map_err(|_| NoteDeckError::ConnectionClosed)
+        // Polling mode: subscription is tracked in the subscriptions map
+        // (no WebSocket command needed — polling loop reads from subscriptions directly)
+        let polls = self.poll_connections.lock().await;
+        if polls.contains_key(account_id) {
+            return Ok(());
+        }
+
+        Err(NoteDeckError::NoConnection(account_id.to_string()))
     }
 }
 
@@ -942,6 +1084,145 @@ async fn handle_ws_message(
                     data: serde_json::to_value(&payload).unwrap_or_default(),
                 });
                 emit_or_log!(emitter, "stream-chat-message-deleted", payload);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Polling mode
+// ---------------------------------------------------------------------------
+
+const MAX_POLL_BACKOFF_SECS: u64 = 60;
+
+/// Per-subscription state for polling (tracks last seen note ID).
+struct PollSubState {
+    since_id: Option<String>,
+}
+
+/// Top-level polling task. Periodically fetches notes for all active subscriptions.
+#[allow(clippy::too_many_arguments)]
+async fn polling_loop(
+    api_client: Arc<MisskeyClient>,
+    emitter: Arc<dyn FrontendEmitter>,
+    event_bus: Arc<EventBus>,
+    db: Arc<Database>,
+    account_id: String,
+    host: String,
+    token: String,
+    interval: Duration,
+    subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut sub_states: HashMap<String, PollSubState> = HashMap::new();
+    let mut consecutive_failures: u64 = 0;
+
+    loop {
+        // Check cancellation
+        if *cancel_rx.borrow() {
+            return;
+        }
+
+        // Collect timeline subscriptions for this account
+        let subs_snapshot: Vec<(String, SubscriptionInfo)> = {
+            let subs = subscriptions.read().await;
+            subs.iter()
+                .filter(|(_, info)| info.account_id == account_id && info.kind == "timeline")
+                .map(|(id, info)| (id.clone(), info.clone()))
+                .collect()
+        };
+
+        let mut poll_failed = false;
+
+        for (sub_id, info) in &subs_snapshot {
+            let state = sub_states.entry(sub_id.clone()).or_insert(PollSubState {
+                since_id: None,
+            });
+
+            let tl_type = TimelineType::new(&info.timeline_type);
+            let mut options = TimelineOptions::new(
+                30,
+                state.since_id.clone(),
+                None,
+            );
+            options.list_id = info.params.as_ref().and_then(|p| {
+                p.get("listId").and_then(|v| v.as_str()).map(|s| s.to_string())
+            });
+
+            match api_client
+                .get_timeline(&host, &token, &account_id, tl_type, options)
+                .await
+            {
+                Ok(notes) if !notes.is_empty() => {
+                    // Update since_id to newest note
+                    state.since_id = Some(notes[0].id.clone());
+
+                    // Emit notes in chronological order (oldest first)
+                    for note in notes.iter().rev() {
+                        // Cache to DB
+                        let db = db.clone();
+                        let note_clone = note.clone();
+                        let timeline_type = info.timeline_type.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = db.cache_note(&note_clone, &timeline_type) {
+                                tracing::warn!(error = %e, "failed to cache polled note");
+                            }
+                        });
+
+                        let payload = StreamNoteEvent {
+                            account_id: account_id.clone(),
+                            subscription_id: sub_id.clone(),
+                            note: note.clone(),
+                        };
+                        event_bus.send(SseEvent {
+                            event_type: "note".to_string(),
+                            data: serde_json::to_value(&payload).unwrap_or_default(),
+                        });
+                        emit_or_log!(emitter, "stream-note", payload);
+                    }
+
+                    consecutive_failures = 0;
+                }
+                Ok(_) => {
+                    // No new notes — success, reset backoff
+                    consecutive_failures = 0;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        account_id = %account_id,
+                        subscription_id = %sub_id,
+                        error = %e,
+                        "polling fetch failed"
+                    );
+                    poll_failed = true;
+                }
+            }
+        }
+
+        // Determine sleep duration
+        let sleep_duration = if poll_failed {
+            consecutive_failures += 1;
+            let backoff = if consecutive_failures > 10 {
+                MAX_POLL_BACKOFF_SECS
+            } else {
+                (1u64 << consecutive_failures.min(5)).min(MAX_POLL_BACKOFF_SECS)
+            };
+
+            emit_or_log!(emitter, "stream-status", StreamStatusEvent {
+                account_id: account_id.clone(),
+                state: "reconnecting".to_string(),
+            });
+
+            Duration::from_secs(backoff)
+        } else {
+            interval
+        };
+
+        // Sleep with cancellation check
+        tokio::select! {
+            _ = tokio::time::sleep(sleep_duration) => {}
+            _ = cancel_rx.changed() => {
+                return;
             }
         }
     }
