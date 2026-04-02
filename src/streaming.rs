@@ -77,7 +77,7 @@ fn ws_config() -> WebSocketConfig {
 pub struct StreamNoteEvent {
     pub account_id: String,
     pub subscription_id: String,
-    pub note: NormalizedNote,
+    pub note: Arc<NormalizedNote>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,7 +93,7 @@ pub struct StreamNotificationEvent {
 pub struct StreamMentionEvent {
     pub account_id: String,
     pub subscription_id: String,
-    pub note: NormalizedNote,
+    pub note: Arc<NormalizedNote>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -993,12 +993,12 @@ async fn handle_ws_message(
 
     if is_note_channel && event_type == "note" {
         if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
-            let note = raw.normalize(account_id, &host);
+            let note = Arc::new(raw.normalize(account_id, &host));
             // Cache to DB asynchronously — don't block the message handler
             let db = db.clone();
-            let note_clone = note.clone();
+            let note_for_cache = Arc::clone(&note);
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = db.cache_note(&note_clone, &timeline_type) {
+                if let Err(e) = db.cache_note(&note_for_cache, &timeline_type) {
                     tracing::warn!(error = %e, "failed to cache streamed note");
                 }
             });
@@ -1047,7 +1047,7 @@ async fn handle_ws_message(
             }
         } else if event_type == "mention" || event_type == "reply" {
             if let Ok(raw) = serde_json::from_value::<RawNote>(event_body.clone()) {
-                let note = raw.normalize(account_id, &host);
+                let note = Arc::new(raw.normalize(account_id, &host));
                 let payload = StreamMentionEvent {
                     account_id: account_id.to_string(),
                     subscription_id: sub_id.clone(),
@@ -1182,13 +1182,14 @@ async fn polling_loop(
                     state.since_id = Some(notes[0].id.clone());
 
                     // Emit notes in chronological order (oldest first)
-                    for note in notes.iter().rev() {
+                    for note in notes.into_iter().rev() {
+                        let note = Arc::new(note);
                         // Cache to DB
                         let db = db.clone();
-                        let note_clone = note.clone();
+                        let note_for_cache = Arc::clone(&note);
                         let timeline_type = info.timeline_type.clone();
                         tokio::task::spawn_blocking(move || {
-                            if let Err(e) = db.cache_note(&note_clone, &timeline_type) {
+                            if let Err(e) = db.cache_note(&note_for_cache, &timeline_type) {
                                 tracing::warn!(error = %e, "failed to cache polled note");
                             }
                         });
@@ -1196,7 +1197,7 @@ async fn polling_loop(
                         let payload = StreamNoteEvent {
                             account_id: account_id.clone(),
                             subscription_id: sub_id.clone(),
-                            note: note.clone(),
+                            note,
                         };
                         event_bus.send(SseEvent {
                             event_type: "note".to_string(),

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -28,24 +28,34 @@ pub struct SummaryRow {
     pub medias_json: Option<String>,
 }
 
+const PRAGMAS_WRITER: &str = "\
+    PRAGMA journal_mode=WAL;\
+    PRAGMA foreign_keys=ON;\
+    PRAGMA synchronous=NORMAL;\
+    PRAGMA mmap_size=268435456;\
+    PRAGMA cache_size=-4000;\
+    PRAGMA temp_store=MEMORY;";
+
+const PRAGMAS_READER: &str = "\
+    PRAGMA mmap_size=268435456;\
+    PRAGMA cache_size=-2000;\
+    PRAGMA temp_store=MEMORY;";
+
+/// SQLite database with separate reader/writer connections.
+/// WAL mode allows concurrent reads while writing.
 pub struct Database {
-    conn: Mutex<Connection>,
+    writer: Mutex<Connection>,
+    reader: Mutex<Connection>,
 }
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self, NoteDeckError> {
-        let mut conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;\
-             PRAGMA foreign_keys=ON;\
-             PRAGMA synchronous=NORMAL;\
-             PRAGMA mmap_size=67108864;\
-             PRAGMA cache_size=-2000;\
-             PRAGMA temp_store=MEMORY;",
-        )?;
+        // Writer connection: migrations, schema changes, inserts/updates/deletes
+        let mut writer = Connection::open(path)?;
+        writer.execute_batch(PRAGMAS_WRITER)?;
 
         // Run numbered migrations (V1, V2, ...)
-        embedded::migrations::runner().run(&mut conn).map_err(|e| {
+        embedded::migrations::runner().run(&mut writer).map_err(|e| {
             NoteDeckError::Database(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
                 Some(format!("Migration failed: {e}")),
@@ -53,22 +63,45 @@ impl Database {
         })?;
 
         // One-time FTS rebuild for existing databases upgraded before FTS5 was added
-        Self::rebuild_fts_if_needed(&conn)?;
+        Self::rebuild_fts_if_needed(&writer)?;
+
+        // Reader connection: SELECT queries only (separate lock from writer)
+        let reader = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        reader.execute_batch(PRAGMAS_READER)?;
 
         let db = Self {
-            conn: Mutex::new(conn),
+            writer: Mutex::new(writer),
+            reader: Mutex::new(reader),
         };
         db.cleanup_cache()?;
         Ok(db)
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>, NoteDeckError> {
-        self.conn.lock().map_err(|_| {
+    fn lock_read(&self) -> Result<MutexGuard<'_, Connection>, NoteDeckError> {
+        self.reader.lock().map_err(|_| {
             NoteDeckError::Database(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
-                Some("Database lock poisoned".to_string()),
+                Some("Reader lock poisoned".to_string()),
             ))
         })
+    }
+
+    fn lock_write(&self) -> Result<MutexGuard<'_, Connection>, NoteDeckError> {
+        self.writer.lock().map_err(|_| {
+            NoteDeckError::Database(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+                Some("Writer lock poisoned".to_string()),
+            ))
+        })
+    }
+
+    /// Alias for lock_write — used by tests that need direct connection access.
+    #[cfg(test)]
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>, NoteDeckError> {
+        self.lock_write()
     }
 
     /// Populate FTS index from existing data if empty (one-time upgrade path).
@@ -101,7 +134,7 @@ impl Database {
     }
 
     pub fn load_accounts(&self) -> Result<Vec<Account>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts ORDER BY rowid",
         )?;
@@ -110,7 +143,7 @@ impl Database {
     }
 
     pub fn upsert_account(&self, account: &Account) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         conn.execute(
             "INSERT INTO accounts (id, host, token, user_id, username, display_name, avatar_url, software)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -135,7 +168,7 @@ impl Database {
     }
 
     pub fn get_account(&self, id: &str) -> Result<Option<Account>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts WHERE id = ?1",
         )?;
@@ -147,7 +180,7 @@ impl Database {
     }
 
     pub fn get_account_by_host(&self, host: &str) -> Result<Option<Account>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts WHERE host = ?1 LIMIT 1",
         )?;
@@ -163,7 +196,7 @@ impl Database {
         host: &str,
         user_id: &str,
     ) -> Result<Option<Account>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT id, host, token, user_id, username, display_name, avatar_url, software FROM accounts WHERE host = ?1 AND user_id = ?2",
         )?;
@@ -176,13 +209,13 @@ impl Database {
 
     /// Clear the token column in DB (after migration to keychain)
     pub fn clear_token(&self, id: &str) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         conn.execute("UPDATE accounts SET token = '' WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     pub fn delete_account(&self, id: &str) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -190,7 +223,7 @@ impl Database {
     // --- Servers ---
 
     pub fn load_servers(&self) -> Result<Vec<StoredServer>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT host, software, version, features_json, updated_at FROM servers",
         )?;
@@ -207,7 +240,7 @@ impl Database {
     }
 
     pub fn get_server(&self, host: &str) -> Result<Option<StoredServer>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT host, software, version, features_json, updated_at FROM servers WHERE host = ?1",
         )?;
@@ -233,7 +266,7 @@ impl Database {
         notes: &[NormalizedNote],
         timeline_type: &str,
     ) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -292,7 +325,7 @@ impl Database {
         until_date: Option<&str>,
         ascending: bool,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let order = if ascending { "ASC" } else { "DESC" };
         let has_query = !query.is_empty();
 
@@ -377,7 +410,7 @@ impl Database {
         timeline_type: &str,
         limit: i64,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT note_json FROM notes_cache
              WHERE account_id = ?1 AND timeline_type = ?2
@@ -405,7 +438,7 @@ impl Database {
 
     /// Delete a single note from the cache (e.g. when a deletion event is received).
     pub fn delete_cached_note(&self, note_id: &str) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         conn.execute(
             "DELETE FROM notes_cache WHERE note_id = ?1",
             params![note_id],
@@ -415,7 +448,7 @@ impl Database {
 
     /// Return (note_count, db_size_bytes).
     pub fn cache_stats(&self) -> Result<(i64, i64), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let count: i64 =
             conn.query_row("SELECT COUNT(*) FROM notes_cache", [], |row| row.get(0))?;
         let page_count: i64 =
@@ -437,7 +470,7 @@ impl Database {
         before: &str,
         limit: i64,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
             "SELECT note_json FROM notes_cache
              WHERE account_id = ?1 AND timeline_type = ?2 AND created_at <= ?3
@@ -464,7 +497,7 @@ impl Database {
         account_id: &str,
         timeline_type: &str,
     ) -> Result<Option<(String, String)>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let result: (Option<String>, Option<String>) = conn.query_row(
             "SELECT MIN(created_at), MAX(created_at) FROM notes_cache
              WHERE account_id = ?1 AND timeline_type = ?2",
@@ -485,7 +518,7 @@ impl Database {
         row: &SummaryRow,
         ttl_secs: i64,
     ) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -528,7 +561,7 @@ impl Database {
     }
 
     pub fn get_cached_summary(&self, url: &str) -> Result<Option<SummaryRow>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -547,7 +580,7 @@ impl Database {
     }
 
     pub fn load_summary_cache(&self, limit: usize) -> Result<Vec<SummaryRow>, NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_read()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -595,7 +628,7 @@ impl Database {
     }
 
     pub fn cleanup_expired_ogp(&self) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -605,7 +638,7 @@ impl Database {
     }
 
     pub fn upsert_server(&self, server: &StoredServer) -> Result<(), NoteDeckError> {
-        let conn = self.lock()?;
+        let conn = self.lock_write()?;
         conn.execute(
             "INSERT INTO servers (host, software, version, features_json, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
