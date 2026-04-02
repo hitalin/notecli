@@ -1221,8 +1221,8 @@ async fn polling_loop(
                     .unwrap_or_default()
             };
 
-            // Fetch in batches of 3 to avoid overwhelming the server
-            for chunk in note_ids.chunks(3) {
+            // Fetch in batches of 8 to balance throughput vs server load
+            for chunk in note_ids.chunks(8) {
                 let futures: Vec<_> = chunk
                     .iter()
                     .map(|note_id| {

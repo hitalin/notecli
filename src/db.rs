@@ -33,12 +33,12 @@ const PRAGMAS_WRITER: &str = "\
     PRAGMA foreign_keys=ON;\
     PRAGMA synchronous=NORMAL;\
     PRAGMA mmap_size=268435456;\
-    PRAGMA cache_size=-4000;\
+    PRAGMA cache_size=-16000;\
     PRAGMA temp_store=MEMORY;";
 
 const PRAGMAS_READER: &str = "\
     PRAGMA mmap_size=268435456;\
-    PRAGMA cache_size=-2000;\
+    PRAGMA cache_size=-8000;\
     PRAGMA temp_store=MEMORY;";
 
 /// SQLite database with separate reader/writer connections.
