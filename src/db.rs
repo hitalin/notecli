@@ -39,8 +39,8 @@ impl Database {
             "PRAGMA journal_mode=WAL;\
              PRAGMA foreign_keys=ON;\
              PRAGMA synchronous=NORMAL;\
-             PRAGMA mmap_size=268435456;\
-             PRAGMA cache_size=-16000;\
+             PRAGMA mmap_size=67108864;\
+             PRAGMA cache_size=-2000;\
              PRAGMA temp_store=MEMORY;",
         )?;
 
