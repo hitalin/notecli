@@ -84,7 +84,8 @@ impl MisskeyClient {
         res: reqwest::Response,
         endpoint: &str,
     ) -> Result<String, NoteDeckError> {
-        if let Some(len) = res.content_length() {
+        let content_len = res.content_length();
+        if let Some(len) = content_len {
             if len > MAX_RESPONSE_BYTES as u64 {
                 return Err(NoteDeckError::Api {
                     endpoint: endpoint.to_string(),
@@ -93,7 +94,7 @@ impl MisskeyClient {
                 });
             }
         }
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(content_len.unwrap_or(4096).min(MAX_RESPONSE_BYTES as u64) as usize);
         let mut stream = res.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(NoteDeckError::from)?;

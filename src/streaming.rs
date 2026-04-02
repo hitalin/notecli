@@ -51,6 +51,7 @@ impl FrontendEmitter for EventBusEmitter {
     }
 }
 
+/// Emit to FrontendEmitter only (status events, polling, etc.)
 macro_rules! emit_or_log {
     ($emitter:expr, $event:expr, $payload:expr) => {
         $emitter.emit(
@@ -58,6 +59,18 @@ macro_rules! emit_or_log {
             serde_json::to_value(&$payload).unwrap_or_default(),
         );
     };
+}
+
+/// Serialize payload once and send to both EventBus and FrontendEmitter.
+macro_rules! emit_event {
+    ($emitter:expr, $event_bus:expr, $event_type:expr, $emitter_event:expr, $payload:expr) => {{
+        let data = serde_json::to_value(&$payload).unwrap_or_default();
+        $event_bus.send(SseEvent {
+            event_type: $event_type.to_string(),
+            data: data.clone(),
+        });
+        $emitter.emit($emitter_event, data);
+    }};
 }
 
 
@@ -809,15 +822,18 @@ async fn run_ws_session(
             .collect()
     };
 
-    for (sub_id, channel, params) in &to_resub {
-        let mut body = json!({ "channel": channel, "id": sub_id });
-        if let Some(p) = params {
-            body["params"] = p.clone();
-        }
-        let msg = json!({ "type": "connect", "body": body });
+    if !to_resub.is_empty() {
         let mut w = write.lock().await;
-        if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-            tracing::warn!(error = %e, "re-subscribe send failed");
+        for (sub_id, channel, params) in &to_resub {
+            let mut body = json!({ "channel": channel, "id": sub_id });
+            if let Some(p) = params {
+                body["params"] = p.clone();
+            }
+            let msg = json!({ "type": "connect", "body": body });
+            if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
+                tracing::warn!(error = %e, "re-subscribe send failed");
+                break;
+            }
         }
     }
 
@@ -933,7 +949,10 @@ async fn handle_ws_message(
         Err(_) => return,
     };
 
-    let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+    let msg_type = match msg.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return,
+    };
 
     // Note Capture: { "type": "noteUpdated", "body": { "id": "...", "type": "...", "body": ... } }
     if msg_type == "noteUpdated" {
@@ -947,11 +966,7 @@ async fn handle_ws_message(
                 update_type,
                 body: update_body,
             };
-            event_bus.send(SseEvent {
-                event_type: "note-capture-updated".to_string(),
-                data: serde_json::to_value(&payload).unwrap_or_default(),
-            });
-            emit_or_log!(emitter, "stream-note-capture-updated", payload);
+            emit_event!(emitter, event_bus, "note-capture-updated", "stream-note-capture-updated", payload);
         }
         return;
     }
@@ -994,7 +1009,6 @@ async fn handle_ws_message(
     if is_note_channel && event_type == "note" {
         if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
             let note = Arc::new(raw.normalize(account_id, &host));
-            // Cache to DB asynchronously — don't block the message handler
             let db = db.clone();
             let note_for_cache = Arc::clone(&note);
             tokio::task::spawn_blocking(move || {
@@ -1007,11 +1021,7 @@ async fn handle_ws_message(
                 subscription_id: sub_id,
                 note,
             };
-            event_bus.send(SseEvent {
-                event_type: "note".to_string(),
-                data: serde_json::to_value(&payload).unwrap_or_default(),
-            });
-            emit_or_log!(emitter, "stream-note", payload);
+            emit_event!(emitter, event_bus, "note", "stream-note", payload);
         }
     } else if is_note_channel && event_type == "noteUpdated" {
         let note_id = event_body.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
@@ -1025,11 +1035,7 @@ async fn handle_ws_message(
             update_type,
             body: update_body,
         };
-        event_bus.send(SseEvent {
-            event_type: "note-updated".to_string(),
-            data: serde_json::to_value(&payload).unwrap_or_default(),
-        });
-        emit_or_log!(emitter, "stream-note-updated", payload);
+        emit_event!(emitter, event_bus, "note-updated", "stream-note-updated", payload);
     } else if kind == "main" {
         if event_type == "notification" {
             if let Ok(raw) = serde_json::from_value::<RawNotification>(event_body) {
@@ -1039,44 +1045,36 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     notification,
                 };
-                event_bus.send(SseEvent {
-                    event_type: "notification".to_string(),
-                    data: serde_json::to_value(&payload).unwrap_or_default(),
-                });
-                emit_or_log!(emitter, "stream-notification", payload);
+                emit_event!(emitter, event_bus, "notification", "stream-notification", payload);
             }
         } else if event_type == "mention" || event_type == "reply" {
-            if let Ok(raw) = serde_json::from_value::<RawNote>(event_body.clone()) {
+            // Serialize event_body as main-event first, then try parsing as mention
+            let main_data = serde_json::to_value(&StreamMainEvent {
+                account_id: account_id.to_string(),
+                subscription_id: sub_id.clone(),
+                event_type,
+                body: event_body.clone(),
+            }).unwrap_or_default();
+            emitter.emit("stream-main-event", main_data);
+
+            if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
                 let note = Arc::new(raw.normalize(account_id, &host));
                 let payload = StreamMentionEvent {
                     account_id: account_id.to_string(),
-                    subscription_id: sub_id.clone(),
+                    subscription_id: sub_id,
                     note,
                 };
-                event_bus.send(SseEvent {
-                    event_type: "mention".to_string(),
-                    data: serde_json::to_value(&payload).unwrap_or_default(),
-                });
-                emit_or_log!(emitter, "stream-mention", payload);
+                emit_event!(emitter, event_bus, "mention", "stream-mention", payload);
             }
-            emit_or_log!(emitter, "stream-main-event", StreamMainEvent {
-                account_id: account_id.to_string(),
-                subscription_id: sub_id,
-                event_type,
-                body: event_body,
-            });
         } else {
+            let main_event_type = format!("main-{event_type}");
             let payload = StreamMainEvent {
                 account_id: account_id.to_string(),
                 subscription_id: sub_id,
                 event_type,
                 body: event_body,
             };
-            event_bus.send(SseEvent {
-                event_type: format!("main-{}", payload.event_type),
-                data: serde_json::to_value(&payload).unwrap_or_default(),
-            });
-            emit_or_log!(emitter, "stream-main-event", payload);
+            emit_event!(emitter, event_bus, main_event_type, "stream-main-event", payload);
         }
     } else if kind == "chat" {
         if event_type == "message" {
@@ -1086,11 +1084,7 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     message: msg,
                 };
-                event_bus.send(SseEvent {
-                    event_type: "chat".to_string(),
-                    data: serde_json::to_value(&payload).unwrap_or_default(),
-                });
-                emit_or_log!(emitter, "stream-chat-message", payload);
+                emit_event!(emitter, event_bus, "chat", "stream-chat-message", payload);
             }
         } else if event_type == "deleted" {
             if let Some(id) = event_body.as_str() {
@@ -1099,11 +1093,7 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     message_id: id.to_string(),
                 };
-                event_bus.send(SseEvent {
-                    event_type: "chat-deleted".to_string(),
-                    data: serde_json::to_value(&payload).unwrap_or_default(),
-                });
-                emit_or_log!(emitter, "stream-chat-message-deleted", payload);
+                emit_event!(emitter, event_bus, "chat-deleted", "stream-chat-message-deleted", payload);
             }
         }
     }
@@ -1199,11 +1189,7 @@ async fn polling_loop(
                             subscription_id: sub_id.clone(),
                             note,
                         };
-                        event_bus.send(SseEvent {
-                            event_type: "note".to_string(),
-                            data: serde_json::to_value(&payload).unwrap_or_default(),
-                        });
-                        emit_or_log!(emitter, "stream-note", payload);
+                        emit_event!(emitter, event_bus, "note", "stream-note", payload);
                     }
 
                     consecutive_failures = 0;
