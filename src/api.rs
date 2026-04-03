@@ -365,6 +365,24 @@ impl MisskeyClient {
         Ok(channels)
     }
 
+    pub async fn search_channels(
+        &self,
+        host: &str,
+        token: &str,
+        query: &str,
+    ) -> Result<Vec<Channel>, NoteDeckError> {
+        let data = self
+            .request(
+                host,
+                token,
+                "channels/search",
+                json!({"query": query, "limit": 100}),
+            )
+            .await?;
+        let channels: Vec<Channel> = serde_json::from_value(data)?;
+        Ok(channels)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn get_channel_notes(
         &self,
