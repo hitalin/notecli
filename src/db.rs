@@ -221,6 +221,43 @@ impl Database {
         Ok(())
     }
 
+    // --- Cache management ---
+
+    /// Delete all cached notes for a specific account.
+    pub fn clear_account_cache(&self, account_id: &str) -> Result<u64, NoteDeckError> {
+        let conn = self.lock_write()?;
+        let deleted = conn.execute(
+            "DELETE FROM notes_cache WHERE account_id = ?1",
+            params![account_id],
+        )?;
+        Ok(deleted as u64)
+    }
+
+    /// Delete all cached notes for every account.
+    pub fn clear_all_notes_cache(&self) -> Result<u64, NoteDeckError> {
+        let conn = self.lock_write()?;
+        let deleted = conn.execute("DELETE FROM notes_cache", [])?;
+        Ok(deleted as u64)
+    }
+
+    /// Delete all OGP cache entries (regardless of TTL).
+    pub fn clear_ogp_cache(&self) -> Result<u64, NoteDeckError> {
+        let conn = self.lock_write()?;
+        let deleted = conn.execute("DELETE FROM ogp_cache", [])?;
+        Ok(deleted as u64)
+    }
+
+    /// Return note count for a specific account.
+    pub fn account_cache_count(&self, account_id: &str) -> Result<i64, NoteDeckError> {
+        let conn = self.lock_read()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM notes_cache WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     // --- Servers ---
 
     pub fn load_servers(&self) -> Result<Vec<StoredServer>, NoteDeckError> {
