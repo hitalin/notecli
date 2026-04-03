@@ -216,6 +216,7 @@ impl Database {
 
     pub fn delete_account(&self, id: &str) -> Result<(), NoteDeckError> {
         let conn = self.lock_write()?;
+        conn.execute("DELETE FROM notes_cache WHERE account_id = ?1", params![id])?;
         conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
         Ok(())
     }
