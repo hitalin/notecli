@@ -21,6 +21,7 @@ thiserror = "2.0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = "1"
+specta = { version = "=2.0.0-rc.22", features = ["derive", "serde_json"], optional = true }
 subtle = "2"
 rand = "0.9"
 keyring-core = { version = "0.7", optional = true }
@@ -57,3 +58,4 @@ keyring = [
     "dep:windows-native-keyring-store",
     "dep:linux-keyutils-keyring-store",
 ]
+specta = ["dep:specta"]

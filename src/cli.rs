@@ -3,6 +3,7 @@ use serde::Serialize;
 
 /// Metadata for a CLI subcommand (exposed to external consumers like notedeck).
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct CliCommandInfo {
     pub name: String,
     pub about: Option<String>,
@@ -11,6 +12,7 @@ pub struct CliCommandInfo {
 
 /// Metadata for a single CLI argument.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct CliArgInfo {
     pub name: String,
     pub help: Option<String>,

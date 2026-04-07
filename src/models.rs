@@ -15,6 +15,7 @@ where
 // --- DB models ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
@@ -35,6 +36,7 @@ impl Drop for Account {
 
 /// Token を含まない、フロントエンド向け Account 構造体
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct AccountPublic {
     pub id: String,
@@ -87,6 +89,7 @@ impl From<Account> for AccountPublic {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StoredServer {
     pub host: String,
@@ -99,6 +102,7 @@ pub struct StoredServer {
 // --- Normalized models (sent to frontend via IPC) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedNote {
     pub id: String,
@@ -148,12 +152,15 @@ pub struct NormalizedNote {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub mode_flags: HashMap<String, bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "specta", specta(type = Option<Box<serde_json::Value>>))]
     pub reply: Option<Box<NormalizedNote>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "specta", specta(type = Option<Box<serde_json::Value>>))]
     pub renote: Option<Box<NormalizedNote>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct AvatarDecoration {
     pub id: String,
@@ -169,6 +176,7 @@ pub struct AvatarDecoration {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct UserInstance {
     pub name: Option<String>,
@@ -178,6 +186,7 @@ pub struct UserInstance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedUser {
     pub id: String,
@@ -196,6 +205,7 @@ pub struct NormalizedUser {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct UserRole {
     pub id: String,
@@ -208,12 +218,14 @@ pub struct UserRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct UserField {
     pub name: String,
     pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedUserDetail {
     pub id: String,
@@ -262,6 +274,7 @@ pub struct NormalizedUserDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedPoll {
     pub choices: Vec<NormalizedPollChoice>,
@@ -271,6 +284,7 @@ pub struct NormalizedPoll {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedPollChoice {
     pub text: String,
@@ -281,6 +295,7 @@ pub struct NormalizedPollChoice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedDriveFile {
     pub id: String,
@@ -296,6 +311,7 @@ pub struct NormalizedDriveFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ReactionInfo {
     pub user: NormalizedUser,
@@ -303,6 +319,7 @@ pub struct ReactionInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedNotification {
     pub id: String,
@@ -329,6 +346,7 @@ pub struct NormalizedNotification {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct CreateNoteParams {
     pub text: Option<String>,
@@ -344,6 +362,7 @@ pub struct CreateNoteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct CreateNotePoll {
     pub choices: Vec<String>,
@@ -352,6 +371,7 @@ pub struct CreateNotePoll {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(transparent)]
 pub struct TimelineType(String);
 
@@ -386,6 +406,7 @@ impl TimelineType {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineFilter {
     pub with_renotes: Option<bool>,
@@ -396,6 +417,7 @@ pub struct TimelineFilter {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineOptions {
     #[serde(default = "default_limit")]
@@ -441,6 +463,7 @@ fn default_limit() -> i64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct UserList {
     pub id: String,
@@ -448,6 +471,7 @@ pub struct UserList {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Antenna {
     pub id: String,
@@ -455,6 +479,7 @@ pub struct Antenna {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
     pub id: String,
@@ -462,6 +487,7 @@ pub struct Clip {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Channel {
     pub id: String,
@@ -469,6 +495,7 @@ pub struct Channel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub id: String,
@@ -488,6 +515,7 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageReaction {
     pub user: Option<ChatReactionUser>,
@@ -495,6 +523,7 @@ pub struct ChatMessageReaction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatReactionUser {
     pub id: String,
@@ -505,6 +534,7 @@ pub struct ChatReactionUser {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatUser {
     pub id: String,
@@ -517,6 +547,7 @@ pub struct ChatUser {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRoom {
     pub id: String,
@@ -525,6 +556,7 @@ pub struct ChatRoom {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct SearchOptions {
     #[serde(default = "default_limit")]
@@ -564,6 +596,7 @@ impl Default for SearchOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct AuthSession {
     pub session_id: String,
@@ -572,6 +605,7 @@ pub struct AuthSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct AuthResult {
     pub token: String,
@@ -793,6 +827,7 @@ pub struct RawEmoji {
 
 /// Emoji info exposed to the frontend via Tauri commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ServerEmoji {
     pub name: String,
     pub url: String,
@@ -883,6 +918,7 @@ pub struct RawNoteReaction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedNoteReaction {
     pub id: String,

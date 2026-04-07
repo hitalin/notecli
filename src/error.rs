@@ -95,6 +95,25 @@ impl NoteDeckError {
     }
 }
 
+/// Shape of NoteDeckError as seen by TypeScript (matches manual Serialize impl).
+#[cfg(feature = "specta")]
+#[derive(specta::Type)]
+#[allow(dead_code)]
+struct NoteDeckErrorShape {
+    code: String,
+    message: String,
+}
+
+#[cfg(feature = "specta")]
+impl specta::Type for NoteDeckError {
+    fn inline(
+        type_map: &mut specta::TypeCollection,
+        generics: specta::Generics,
+    ) -> specta::datatype::DataType {
+        NoteDeckErrorShape::inline(type_map, generics)
+    }
+}
+
 impl serde::Serialize for NoteDeckError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
