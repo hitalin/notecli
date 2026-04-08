@@ -136,17 +136,25 @@ impl MisskeyClient {
 
         if !res.status().is_success() {
             let status = res.status().as_u16();
-            let detail = match res.json::<Value>().await {
-                Ok(body) => body
-                    .pointer("/error/message")
-                    .or_else(|| body.pointer("/error/code"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                Err(_) => None,
+            let (api_code, detail) = match res.json::<Value>().await {
+                Ok(body) => {
+                    let code = body
+                        .pointer("/error/code")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let msg = body
+                        .pointer("/error/message")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    (code, msg)
+                }
+                Err(_) => (None, None),
             };
-            let message = match detail {
-                Some(d) => format!("{endpoint}: {d}"),
-                None => format!("{endpoint} ({status})"),
+            let message = match (&api_code, &detail) {
+                (Some(c), Some(d)) => format!("{endpoint}: {c}: {d}"),
+                (Some(c), None) => format!("{endpoint}: {c}"),
+                (None, Some(d)) => format!("{endpoint}: {d}"),
+                (None, None) => format!("{endpoint} ({status})"),
             };
             return Err(NoteDeckError::Api {
                 endpoint: endpoint.to_string(),
@@ -1885,6 +1893,23 @@ impl MisskeyClient {
             host,
             token,
             "clips/add-note",
+            json!({ "clipId": clip_id, "noteId": note_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_note_from_clip(
+        &self,
+        host: &str,
+        token: &str,
+        clip_id: &str,
+        note_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "clips/remove-note",
             json!({ "clipId": clip_id, "noteId": note_id }),
         )
         .await?;
