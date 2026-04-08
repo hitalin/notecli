@@ -924,6 +924,7 @@ mod tests {
                 avatar_url: None,
                 emojis: HashMap::new(),
                 is_bot: false,
+                is_cat: false,
                 avatar_decorations: Vec::new(),
                 instance: None,
             },

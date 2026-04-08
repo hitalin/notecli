@@ -197,6 +197,8 @@ pub struct NormalizedUser {
     #[serde(default)]
     pub is_bot: bool,
     #[serde(default)]
+    pub is_cat: bool,
+    #[serde(default)]
     pub avatar_decorations: Vec<AvatarDecoration>,
     #[serde(default)]
     pub emojis: HashMap<String, String>,
@@ -669,6 +671,8 @@ pub struct RawUser {
     #[serde(default)]
     pub is_bot: bool,
     #[serde(default)]
+    pub is_cat: bool,
+    #[serde(default)]
     pub avatar_decorations: Vec<AvatarDecoration>,
     #[serde(default)]
     pub emojis: HashMap<String, String>,
@@ -948,6 +952,7 @@ impl From<RawUser> for NormalizedUser {
             name: user.name,
             avatar_url: user.avatar_url,
             is_bot: user.is_bot,
+            is_cat: user.is_cat,
             avatar_decorations: user.avatar_decorations,
             emojis: user.emojis,
             instance: user.instance,
