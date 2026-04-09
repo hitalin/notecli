@@ -1992,13 +1992,14 @@ impl MisskeyClient {
 
     // --- Server Discovery (unauthenticated) ---
 
-    /// Fetch server meta (icon URL) via /api/meta (unauthenticated).
+    /// Fetch server meta via /api/meta (unauthenticated).
+    /// `detail: true` を渡すことで infoImageUrl, notFoundImageUrl, serverErrorImageUrl 等も取得。
     pub async fn fetch_server_meta(&self, host: &str) -> Result<Value, NoteDeckError> {
         let url = self.api_url(host, "meta");
         let res = self
             .client
             .post(&url)
-            .json(&json!({}))
+            .json(&json!({ "detail": true }))
             .timeout(Duration::from_secs(10))
             .send()
             .await?;
