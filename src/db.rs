@@ -312,12 +312,13 @@ impl Database {
         let tx = conn.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO notes_cache (note_id, account_id, server_host, created_at, text, note_json, cached_at, timeline_type)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO notes_cache (note_id, account_id, server_host, created_at, text, note_json, cached_at, timeline_type, uri)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(note_id, account_id) DO UPDATE SET
                      note_json = excluded.note_json,
                      cached_at = excluded.cached_at,
-                     timeline_type = excluded.timeline_type",
+                     timeline_type = excluded.timeline_type,
+                     uri = excluded.uri",
             )?;
             for note in notes {
                 let json = serde_json::to_string(note).unwrap_or_default();
@@ -330,6 +331,7 @@ impl Database {
                     json,
                     now,
                     timeline_type,
+                    note.uri,
                 ])?;
             }
         }
@@ -343,6 +345,27 @@ impl Database {
         timeline_type: &str,
     ) -> Result<(), NoteDeckError> {
         self.cache_notes(std::slice::from_ref(note), timeline_type)
+    }
+
+    /// Find cached notes by ActivityPub URI across all accounts.
+    /// Uses the partial index on `uri` for fast lookups.
+    pub fn find_notes_by_uri(&self, uri: &str) -> Result<Vec<NormalizedNote>, NoteDeckError> {
+        let conn = self.lock_read()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT note_json FROM notes_cache WHERE uri = ?1",
+        )?;
+        let rows = stmt.query_map(params![uri], |row| {
+            let json: String = row.get(0)?;
+            Ok(json)
+        })?;
+        let mut notes = Vec::new();
+        for row in rows {
+            let json = row?;
+            if let Ok(note) = serde_json::from_str::<NormalizedNote>(&json) {
+                notes.push(note);
+            }
+        }
+        Ok(notes)
     }
 
     pub fn search_cached_notes(
