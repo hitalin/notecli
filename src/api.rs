@@ -588,6 +588,7 @@ impl MisskeyClient {
         file_data: Vec<u8>,
         content_type: &str,
         is_sensitive: bool,
+        folder_id: Option<&str>,
     ) -> Result<NormalizedDriveFile, NoteDeckError> {
         let file_part = Part::bytes(file_data)
             .file_name(file_name.to_string())
@@ -598,10 +599,13 @@ impl MisskeyClient {
                 message: e.to_string(),
             })?;
 
-        let form = Form::new()
+        let mut form = Form::new()
             .text("i", token.to_string())
             .text("isSensitive", is_sensitive.to_string())
             .part("file", file_part);
+        if let Some(id) = folder_id {
+            form = form.text("folderId", id.to_string());
+        }
 
         let url = self.api_url(host, "drive/files/create");
         let resp = self.client.post(&url).multipart(form).send().await?;
