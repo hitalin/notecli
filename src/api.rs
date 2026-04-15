@@ -538,6 +538,23 @@ impl MisskeyClient {
         Ok(())
     }
 
+    pub async fn vote_poll(
+        &self,
+        host: &str,
+        token: &str,
+        note_id: &str,
+        choice: u32,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "notes/polls/vote",
+            json!({ "noteId": note_id, "choice": choice }),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_note_reactions(
         &self,
         host: &str,
@@ -2247,6 +2264,19 @@ mod tests {
             .create_reaction("h", "token", "n1", ":star:")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn vote_poll_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/polls/vote"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client.vote_poll("h", "token", "n1", 2).await.unwrap();
     }
 
     #[tokio::test]
