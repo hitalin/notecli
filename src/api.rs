@@ -1292,6 +1292,30 @@ impl MisskeyClient {
         self.request(host, token, "roles/users", params).await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn get_role_notes(
+        &self,
+        host: &str,
+        token: &str,
+        account_id: &str,
+        role_id: &str,
+        limit: i64,
+        since_id: Option<&str>,
+        until_id: Option<&str>,
+    ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
+        let mut params = json!({
+            "roleId": role_id,
+            "limit": limit,
+        });
+        apply_pagination(&mut params, since_id, until_id);
+        let data = self.request(host, token, "roles/notes", params).await?;
+        let raw: Vec<RawNote> = serde_json::from_value(data)?;
+        Ok(raw
+            .into_iter()
+            .map(|n| n.normalize(account_id, host))
+            .collect())
+    }
+
     // --- Announcements ---
 
     pub async fn get_announcements(

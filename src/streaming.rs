@@ -510,6 +510,33 @@ impl StreamingManager {
         Ok(sub_id)
     }
 
+    pub async fn subscribe_role(
+        &self,
+        account_id: &str,
+        role_id: &str,
+    ) -> Result<String, NoteDeckError> {
+        let sub_id = uuid::Uuid::new_v4().to_string();
+        let params = Some(json!({ "roleId": role_id }));
+
+        let host = self.get_host(account_id).await?;
+        self.send_subscribe(account_id, "roleTimeline", &sub_id, params.clone()).await?;
+
+        let mut subs = self.subscriptions.write().await;
+        subs.insert(
+            sub_id.clone(),
+            SubscriptionInfo {
+                account_id: account_id.to_string(),
+                host,
+                kind: "role".to_string(),
+                channel: "roleTimeline".to_string(),
+                timeline_type: String::new(),
+                params,
+            },
+        );
+
+        Ok(sub_id)
+    }
+
     pub async fn subscribe_chat_user(
         &self,
         account_id: &str,
@@ -1004,7 +1031,7 @@ async fn handle_ws_message(
         }
     };
 
-    let is_note_channel = matches!(kind.as_str(), "timeline" | "antenna" | "channel");
+    let is_note_channel = matches!(kind.as_str(), "timeline" | "antenna" | "channel" | "role");
 
     if is_note_channel && event_type == "note" {
         if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
