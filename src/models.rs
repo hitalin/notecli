@@ -135,6 +135,8 @@ pub struct NormalizedNote {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<Channel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reaction_acceptance: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
@@ -494,6 +496,8 @@ pub struct Clip {
 pub struct Channel {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -643,6 +647,7 @@ pub struct RawNote {
     pub reply_id: Option<String>,
     pub renote_id: Option<String>,
     pub channel_id: Option<String>,
+    pub channel: Option<Channel>,
     pub reaction_acceptance: Option<String>,
     pub uri: Option<String>,
     pub url: Option<String>,
@@ -886,6 +891,7 @@ impl RawNote {
             reply_id: self.reply_id,
             renote_id: self.renote_id,
             channel_id: self.channel_id,
+            channel: self.channel,
             reaction_acceptance: self.reaction_acceptance,
             uri: self.uri,
             url: self.url,
