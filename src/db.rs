@@ -55,12 +55,14 @@ impl Database {
         writer.execute_batch(PRAGMAS_WRITER)?;
 
         // Run numbered migrations (V1, V2, ...)
-        embedded::migrations::runner().run(&mut writer).map_err(|e| {
-            NoteDeckError::Database(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
-                Some(format!("Migration failed: {e}")),
-            ))
-        })?;
+        embedded::migrations::runner()
+            .run(&mut writer)
+            .map_err(|e| {
+                NoteDeckError::Database(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(format!("Migration failed: {e}")),
+                ))
+            })?;
 
         // One-time FTS rebuild for existing databases upgraded before FTS5 was added
         Self::rebuild_fts_if_needed(&writer)?;
@@ -68,7 +70,9 @@ impl Database {
         // Reader connection: SELECT queries only (separate lock from writer)
         let reader = Connection::open_with_flags(
             path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
         )?;
         reader.execute_batch(PRAGMAS_READER)?;
 
@@ -351,9 +355,7 @@ impl Database {
     /// Uses the partial index on `uri` for fast lookups.
     pub fn find_notes_by_uri(&self, uri: &str) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let conn = self.lock_read()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT note_json FROM notes_cache WHERE uri = ?1",
-        )?;
+        let mut stmt = conn.prepare_cached("SELECT note_json FROM notes_cache WHERE uri = ?1")?;
         let rows = stmt.query_map(params![uri], |row| {
             let json: String = row.get(0)?;
             Ok(json)
@@ -963,6 +965,7 @@ mod tests {
             reply_id: None,
             renote_id: None,
             channel_id: None,
+            channel: None,
             reaction_acceptance: None,
             uri: None,
             url: None,
