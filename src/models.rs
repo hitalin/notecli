@@ -499,6 +499,174 @@ pub struct Antenna {
     pub name: String,
 }
 
+// =============================================================================
+// Misskey `charts/*` レスポンス。9 種類のエンドポイントごとに別構造体。
+// 各フィールドは時系列データ点 (新→古順、index 0 = 今日) を i64 配列で持つ。
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct UserNotesChartDiffs {
+    pub normal: Vec<i64>,
+    pub reply: Vec<i64>,
+    pub renote: Vec<i64>,
+    pub with_file: Vec<i64>,
+}
+
+/// `charts/user/notes`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct UserNotesChart {
+    pub inc: Vec<i64>,
+    pub dec: Vec<i64>,
+    pub diffs: UserNotesChartDiffs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct FollowChartGroup {
+    pub inc: Vec<i64>,
+    pub dec: Vec<i64>,
+    pub total: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct FollowChartSection {
+    pub followings: FollowChartGroup,
+    pub followers: FollowChartGroup,
+}
+
+/// `charts/user/following`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct UserFollowingChart {
+    pub local: FollowChartSection,
+    pub remote: FollowChartSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct PvChartGroup {
+    pub user: Vec<i64>,
+    pub visitor: Vec<i64>,
+}
+
+/// `charts/user/pv` (pv = Natural PV、upv = Unique PV)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct UserPvChart {
+    pub pv: PvChartGroup,
+    pub upv: PvChartGroup,
+}
+
+/// `charts/active-users`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveUsersChart {
+    pub read_write: Vec<i64>,
+    pub read: Vec<i64>,
+    pub write: Vec<i64>,
+    pub registered_within_week: Vec<i64>,
+    pub registered_within_month: Vec<i64>,
+    pub registered_within_year: Vec<i64>,
+    pub registered_outside_week: Vec<i64>,
+    pub registered_outside_month: Vec<i64>,
+    pub registered_outside_year: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ServerNotesChartSection {
+    pub total: Vec<i64>,
+    pub inc: Vec<i64>,
+    pub dec: Vec<i64>,
+    pub diffs: UserNotesChartDiffs,
+}
+
+/// `charts/notes`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ServerNotesChart {
+    pub local: ServerNotesChartSection,
+    pub remote: ServerNotesChartSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ServerUsersChartSection {
+    pub total: Vec<i64>,
+    pub inc: Vec<i64>,
+    pub dec: Vec<i64>,
+}
+
+/// `charts/users`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ServerUsersChart {
+    pub local: ServerUsersChartSection,
+    pub remote: ServerUsersChartSection,
+}
+
+/// `charts/federation`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct FederationChart {
+    pub delivered_instances: Vec<i64>,
+    pub inbox_instances: Vec<i64>,
+    pub stalled: Vec<i64>,
+    pub sub: Vec<i64>,
+    /// `pub` は Rust 予約語。サーバーの JSON キーは "pub"。
+    #[serde(rename = "pub")]
+    pub pub_: Vec<i64>,
+    pub pubsub: Vec<i64>,
+    pub sub_active: Vec<i64>,
+    #[serde(rename = "pubActive")]
+    pub pub_active: Vec<i64>,
+}
+
+/// `charts/ap-request` (ActivityPub の配送成功/失敗/受信数)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ApRequestChart {
+    pub deliver_succeeded: Vec<i64>,
+    pub deliver_failed: Vec<i64>,
+    pub inbox_received: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ServerDriveChartSection {
+    pub inc_count: Vec<i64>,
+    pub inc_size: Vec<i64>,
+    pub dec_count: Vec<i64>,
+    pub dec_size: Vec<i64>,
+}
+
+/// `charts/drive` (Size は KB 単位)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct ServerDriveChart {
+    pub local: ServerDriveChartSection,
+    pub remote: ServerDriveChartSection,
+}
+
 /// Misskey `notes/drafts/*` (2025.6+) のレスポンス。`notes/drafts/list` は
 /// `Vec<NoteDraft>`、`notes/drafts/create` は `{ createdDraft: NoteDraft }`、
 /// `notes/drafts/update` は `{ updatedDraft: NoteDraft }` を返す
