@@ -499,6 +499,50 @@ pub struct Antenna {
     pub name: String,
 }
 
+/// Misskey `notes/drafts/*` (2025.6+) のレスポンス。`notes/drafts/list` は
+/// `Vec<NoteDraft>`、`notes/drafts/create` は `{ createdDraft: NoteDraft }`、
+/// `notes/drafts/update` は `{ updatedDraft: NoteDraft }` を返す
+/// (notedeck 側でラッパーを剥がして直接 NoteDraft を渡す)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteDraftPoll {
+    pub choices: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiple: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteDraft {
+    pub id: String,
+    pub created_at: String,
+    pub text: Option<String>,
+    pub cw: Option<String>,
+    pub visibility: String,
+    #[serde(default)]
+    pub local_only: bool,
+    #[serde(default)]
+    pub file_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hashtag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renote_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll: Option<NoteDraftPoll>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<i64>,
+    #[serde(default)]
+    pub is_actually_scheduled: bool,
+}
+
 /// Misskey `clips/*` (clips/list, clips/show, clips/create, users/clips,
 /// clips/my-favorites) の共通レスポンス。本家 schema
 /// (packages/backend/src/models/json-schema/clip.ts) に準拠。
