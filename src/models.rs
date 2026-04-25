@@ -482,12 +482,28 @@ pub struct Antenna {
     pub name: String,
 }
 
+/// Misskey `clips/*` (clips/list, clips/show, clips/create, users/clips,
+/// clips/my-favorites) の共通レスポンス。本家 schema
+/// (packages/backend/src/models/json-schema/clip.ts) に準拠。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
     pub id: String,
+    pub created_at: String,
+    pub last_clipped_at: Option<String>,
+    pub user_id: String,
+    pub user: NormalizedUser,
     pub name: String,
+    pub description: Option<String>,
+    pub is_public: bool,
+    pub favorited_count: i64,
+    /// `isFavorited` はログイン時のみサーバーから返る。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_favorited: Option<bool>,
+    /// `notesCount` は一部エンドポイントのみ返る。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
