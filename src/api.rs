@@ -909,6 +909,97 @@ impl MisskeyClient {
         }
     }
 
+    /// Fetch a single registry value at the given scope/key.
+    /// Returns None when the key does not exist (NO_SUCH_KEY) or the API errors.
+    /// Propagates network and other non-API errors.
+    pub async fn get_registry_value(
+        &self,
+        host: &str,
+        token: &str,
+        scope: &[String],
+        key: &str,
+    ) -> Result<Option<Value>, NoteDeckError> {
+        let data = self
+            .request(
+                host,
+                token,
+                "i/registry/get",
+                json!({ "scope": scope, "key": key }),
+            )
+            .await;
+        match data {
+            Ok(v) => Ok(Some(v)),
+            Err(NoteDeckError::Api { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set a registry value at the given scope/key.
+    pub async fn set_registry_value(
+        &self,
+        host: &str,
+        token: &str,
+        scope: &[String],
+        key: &str,
+        value: Value,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "i/registry/set",
+            json!({ "scope": scope, "key": key, "value": value }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Remove a registry value at the given scope/key.
+    /// Returns Ok even if the key did not exist (NO_SUCH_KEY).
+    pub async fn remove_registry_value(
+        &self,
+        host: &str,
+        token: &str,
+        scope: &[String],
+        key: &str,
+    ) -> Result<(), NoteDeckError> {
+        let res = self
+            .request(
+                host,
+                token,
+                "i/registry/remove",
+                json!({ "scope": scope, "key": key }),
+            )
+            .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(NoteDeckError::Api { .. }) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// List keys in a registry scope as `{ key: type }`.
+    /// Returns an empty map when the scope is empty or the API errors.
+    pub async fn list_registry_keys(
+        &self,
+        host: &str,
+        token: &str,
+        scope: &[String],
+    ) -> Result<HashMap<String, String>, NoteDeckError> {
+        let data = self
+            .request(
+                host,
+                token,
+                "i/registry/keys-with-type",
+                json!({ "scope": scope }),
+            )
+            .await;
+        match data {
+            Ok(v) => Ok(serde_json::from_value(v).unwrap_or_default()),
+            Err(NoteDeckError::Api { .. }) => Ok(HashMap::new()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn get_note_children(
         &self,
         host: &str,
@@ -2484,5 +2575,105 @@ mod tests {
             .unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].id, "r1");
+    }
+
+    #[tokio::test]
+    async fn get_registry_value_returns_some_on_hit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/registry/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!("dark-theme-id")))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let scope = vec!["client".to_string(), "preferences".to_string(), "sync".to_string()];
+        let result = client
+            .get_registry_value("h", "token", &scope, "theme:dark")
+            .await
+            .unwrap();
+        assert_eq!(result, Some(json!("dark-theme-id")));
+    }
+
+    #[tokio::test]
+    async fn get_registry_value_returns_none_on_no_such_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/registry/get"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(
+                    json!({"error": {"message": "No such key", "code": "NO_SUCH_KEY"}}),
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let scope = vec!["client".to_string(), "base".to_string()];
+        let result = client
+            .get_registry_value("h", "token", &scope, "missing")
+            .await
+            .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn set_registry_value_round_trip() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/registry/set"))
+            .respond_with(ResponseTemplate::new(204).set_body_string(""))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let scope = vec!["client".to_string(), "preferences".to_string(), "sync".to_string()];
+        client
+            .set_registry_value("h", "token", &scope, "theme:dark", json!("my-theme"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_registry_value_swallows_no_such_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/registry/remove"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(
+                    json!({"error": {"message": "No such key", "code": "NO_SUCH_KEY"}}),
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let scope = vec!["client".to_string(), "base".to_string()];
+        client
+            .remove_registry_value("h", "token", &scope, "missing")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_registry_keys_parses_type_map() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/registry/keys-with-type"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"theme:dark": "string", "plugins": "array"}),
+            ))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let scope = vec!["client".to_string(), "preferences".to_string(), "sync".to_string()];
+        let result = client
+            .list_registry_keys("h", "token", &scope)
+            .await
+            .unwrap();
+        assert_eq!(result.get("theme:dark").map(String::as_str), Some("string"));
+        assert_eq!(result.get("plugins").map(String::as_str), Some("array"));
     }
 }
