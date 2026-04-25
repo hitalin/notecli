@@ -500,6 +500,110 @@ pub struct Antenna {
 }
 
 // =============================================================================
+// Misskey users 系個別エンドポイント (users/reactions, users/pages,
+// users/flashs, users/gallery/posts)。本家 schema 準拠。
+// =============================================================================
+
+/// `users/reactions` の 1 件分。自分のプロフィールで「リアクション」タブを
+/// 開いたときに、自分が付けたリアクションとその対象 note を一覧する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct UserReaction {
+    pub id: String,
+    pub created_at: String,
+    /// `type` は Rust 予約語。サーバーの JSON キーは "type"。
+    #[serde(rename = "type")]
+    pub reaction_type: String,
+    pub note: NormalizedNote,
+}
+
+/// `users/pages` / `pages/show` の 1 件分。本家 packages/backend/src/models/Page.ts。
+/// プロフィール一覧で使うのは title / summary / createdAt のみだが、
+/// `pages/show` でも同型を使えるようフルセットで定義。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct Page {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub title: String,
+    pub name: String,
+    pub summary: Option<String>,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<NormalizedUser>,
+    /// `content` / `variables` はブロック構造で複雑。生 JSON で運ぶ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub align_center: bool,
+    #[serde(default)]
+    pub hide_title_when_pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eye_catching_image_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eye_catching_image: Option<NormalizedDriveFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liked_count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_liked: Option<bool>,
+}
+
+/// `users/flashs` / `flash/show` の 1 件分。本家
+/// packages/backend/src/models/Flash.ts。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct Flash {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub title: String,
+    pub summary: String,
+    pub script: String,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<NormalizedUser>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liked_count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_liked: Option<bool>,
+}
+
+/// `users/gallery/posts` / `gallery/posts/show` の 1 件分。本家
+/// packages/backend/src/models/GalleryPost.ts。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryPost {
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<NormalizedUser>,
+    pub files: Vec<NormalizedDriveFile>,
+    #[serde(default)]
+    pub is_sensitive: bool,
+    #[serde(default)]
+    pub liked_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_liked: Option<bool>,
+}
+
+// =============================================================================
 // Misskey `charts/*` レスポンス。9 種類のエンドポイントごとに別構造体。
 // 各フィールドは時系列データ点 (新→古順、index 0 = 今日) を i64 配列で持つ。
 // =============================================================================
