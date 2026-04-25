@@ -2404,8 +2404,8 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/users/lists/list"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                {"id": "l1", "name": "Friends"},
-                {"id": "l2", "name": "Tech"}
+                {"id": "l1", "name": "Friends", "isPublic": false},
+                {"id": "l2", "name": "Tech", "isPublic": true}
             ])))
             .mount(&server)
             .await;

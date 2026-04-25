@@ -466,12 +466,29 @@ fn default_limit() -> i64 {
     20
 }
 
+/// Misskey `users/lists/*` (list, show) の共通レスポンス。本家 schema
+/// (packages/backend/src/models/json-schema/user-list.ts) に準拠。
+///
+/// `forPublic=true` で他人の公開リストを取得した時のみ `isLiked` /
+/// `likedCount` が付加される (Clips の `isFavorited` / `favoritedCount` と
+/// 非対称な命名は本家準拠)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct UserList {
     pub id: String,
     pub name: String,
+    pub is_public: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_liked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liked_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
