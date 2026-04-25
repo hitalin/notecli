@@ -504,6 +504,20 @@ pub struct Antenna {
 // users/flashs, users/gallery/posts)。本家 schema 準拠。
 // =============================================================================
 
+/// `users/reactions` がレスポンス内で含む note への薄い参照。
+///
+/// users/reactions のレスポンスは raw Misskey note schema を含むが、
+/// notecli の NormalizedNote は `RawNote.normalize(account_id, host)` を経て
+/// 構築する独自モデルなので直接デシリアライズできない。
+/// notedeck 側ではこの id を使って adapter 経由で再取得・正規化する設計のため、
+/// id のみ抜き出す。サーバーから来る他のフィールドは serde の default で破棄。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct UserReactionNoteRef {
+    pub id: String,
+}
+
 /// `users/reactions` の 1 件分。自分のプロフィールで「リアクション」タブを
 /// 開いたときに、自分が付けたリアクションとその対象 note を一覧する。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,7 +529,7 @@ pub struct UserReaction {
     /// `type` は Rust 予約語。サーバーの JSON キーは "type"。
     #[serde(rename = "type")]
     pub reaction_type: String,
-    pub note: NormalizedNote,
+    pub note: UserReactionNoteRef,
 }
 
 /// `users/pages` / `pages/show` の 1 件分。本家 packages/backend/src/models/Page.ts。
