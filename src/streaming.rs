@@ -199,6 +199,11 @@ struct SubscriptionInfo {
     timeline_type: String,
     /// Extra params for channel subscription (e.g. listId for userListTimeline)
     params: Option<Value>,
+    /// Whether this subscription is actively connected/polled.
+    ///
+    /// Suspended subscriptions keep their metadata for viewport-based resume and
+    /// reconnect replay, but stop receiving work from the upstream server.
+    active: bool,
 }
 
 pub struct StreamingManager {
@@ -450,6 +455,7 @@ impl StreamingManager {
                 channel: channel.clone(),
                 timeline_type: timeline_type.as_str().to_string(),
                 params,
+                active: true,
             },
         );
 
@@ -477,6 +483,7 @@ impl StreamingManager {
                 channel: "antenna".to_string(),
                 timeline_type: String::new(),
                 params,
+                active: true,
             },
         );
 
@@ -504,6 +511,7 @@ impl StreamingManager {
                 channel: "channel".to_string(),
                 timeline_type: String::new(),
                 params,
+                active: true,
             },
         );
 
@@ -531,6 +539,7 @@ impl StreamingManager {
                 channel: "roleTimeline".to_string(),
                 timeline_type: String::new(),
                 params,
+                active: true,
             },
         );
 
@@ -558,6 +567,7 @@ impl StreamingManager {
                 channel: "chatUser".to_string(),
                 timeline_type: String::new(),
                 params,
+                active: true,
             },
         );
 
@@ -585,6 +595,7 @@ impl StreamingManager {
                 channel: "chatRoom".to_string(),
                 timeline_type: String::new(),
                 params,
+                active: true,
             },
         );
 
@@ -607,6 +618,7 @@ impl StreamingManager {
                 channel: "main".to_string(),
                 timeline_type: String::new(),
                 params: None,
+                active: true,
             },
         );
 
@@ -627,6 +639,76 @@ impl StreamingManager {
         let mut subs = self.subscriptions.write().await;
         subs.remove(subscription_id);
 
+        Ok(())
+    }
+
+    /// Suspend a subscription without forgetting its metadata.
+    ///
+    /// This is used by viewport budgeting: inactive deck columns should stop
+    /// upstream work, but reconnect/polling/resume still need the original
+    /// channel and params.
+    pub async fn suspend_subscription(
+        &self,
+        account_id: &str,
+        subscription_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        {
+            let mut subs = self.subscriptions.write().await;
+            let info = subs
+                .get_mut(subscription_id)
+                .ok_or_else(|| {
+                    NoteDeckError::InvalidInput("subscription not found".to_string())
+                })?;
+            if info.account_id != account_id {
+                return Err(NoteDeckError::InvalidInput(
+                    "subscription account mismatch".to_string(),
+                ));
+            }
+            if !info.active {
+                return Ok(());
+            }
+            info.active = false;
+        }
+
+        let conns = self.connections.lock().await;
+        if let Some(handle) = conns.get(account_id) {
+            let _ = handle.cmd_tx.send(WsCommand::Unsubscribe {
+                id: subscription_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Resume a suspended subscription using the original subscription ID.
+    pub async fn resume_subscription(
+        &self,
+        account_id: &str,
+        subscription_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        let (channel, params, was_active) = {
+            let subs = self.subscriptions.read().await;
+            let info = subs
+                .get(subscription_id)
+                .ok_or_else(|| {
+                    NoteDeckError::InvalidInput("subscription not found".to_string())
+                })?;
+            if info.account_id != account_id {
+                return Err(NoteDeckError::InvalidInput(
+                    "subscription account mismatch".to_string(),
+                ));
+            }
+            (info.channel.clone(), info.params.clone(), info.active)
+        };
+        if was_active {
+            return Ok(());
+        }
+
+        self.send_subscribe(account_id, &channel, subscription_id, params).await?;
+
+        let mut subs = self.subscriptions.write().await;
+        if let Some(info) = subs.get_mut(subscription_id) {
+            info.active = true;
+        }
         Ok(())
     }
 
@@ -844,7 +926,7 @@ async fn run_ws_session(
     let to_resub: Vec<(String, String, Option<Value>)> = {
         let subs = subscriptions.read().await;
         subs.iter()
-            .filter(|(_, info)| info.account_id == account_id)
+            .filter(|(_, info)| info.account_id == account_id && info.active)
             .map(|(sub_id, info)| (sub_id.clone(), info.channel.clone(), info.params.clone()))
             .collect()
     };
@@ -1168,7 +1250,9 @@ async fn polling_loop(
         let subs_snapshot: Vec<(String, SubscriptionInfo)> = {
             let subs = subscriptions.read().await;
             subs.iter()
-                .filter(|(_, info)| info.account_id == account_id && info.kind == "timeline")
+                .filter(|(_, info)| {
+                    info.account_id == account_id && info.kind == "timeline" && info.active
+                })
                 .map(|(id, info)| (id.clone(), info.clone()))
                 .collect()
         };
