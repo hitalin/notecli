@@ -49,6 +49,7 @@ const INCREMENTAL_VACUUM_PAGES_PER_BOOT: i64 = 1000;
 /// 「過去ノートを一瞬でローカル検索」という UX を尊重し、 暴走防止の hard cap
 /// だけを残す。 アプリ側からユーザー設定で上書きできる。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct EvictionConfig {
     /// 各アカウントごとの note 上限。`None` なら無制限。
