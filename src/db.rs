@@ -41,6 +41,16 @@ const PRAGMAS_READER: &str = "\
     PRAGMA cache_size=-8000;\
     PRAGMA temp_store=MEMORY;";
 
+/// `notes_cache` のアカウントごとの上限。これを超えると古い順 (cached_at ASC) で
+/// 削除される。長期利用での DB 肥大化を抑える hard cap。
+const PER_ACCOUNT_NOTE_LIMIT: i64 = 50_000;
+/// `notes_cache` の TTL (日)。`cached_at` がこの日数より古い行は削除される。
+/// 鮮度の落ちたデータの自動掃除。
+const NOTES_TTL_DAYS: i64 = 90;
+/// 起動時の `incremental_vacuum` で 1 度に返却する free page の上限。
+/// 大きすぎると起動が遅くなり、小さすぎると free page が溜まり続ける。
+const INCREMENTAL_VACUUM_PAGES_PER_BOOT: i64 = 1000;
+
 /// SQLite database with separate reader/writer connections.
 /// WAL mode allows concurrent reads while writing.
 pub struct Database {
@@ -53,6 +63,11 @@ impl Database {
         // Writer connection: migrations, schema changes, inserts/updates/deletes
         let mut writer = Connection::open(path)?;
         writer.execute_batch(PRAGMAS_WRITER)?;
+
+        // auto_vacuum=INCREMENTAL を保証してから migration 走らせる。
+        // auto_vacuum モード変更は VACUUM 後に有効化される SQLite の仕様なので、
+        // 既存 DB の場合はここで一度だけ VACUUM が走る。
+        Self::ensure_incremental_vacuum(&writer)?;
 
         // Run numbered migrations (V1, V2, ...)
         embedded::migrations::runner()
@@ -81,7 +96,24 @@ impl Database {
             reader: Mutex::new(reader),
         };
         db.cleanup_cache()?;
+        // cleanup で生まれた free page を少し返却する (起動コスト一定)。
+        db.incremental_vacuum_step()?;
         Ok(db)
+    }
+
+    /// `auto_vacuum=INCREMENTAL` を保証する。SQLite では `auto_vacuum` モード変更は
+    /// VACUUM 後にしか有効化されない仕様のため、必要なら 1 度だけ VACUUM を走らせる。
+    /// 新規 DB なら最初の `PRAGMA auto_vacuum` 実行で適用済みとなり VACUUM は走らない。
+    fn ensure_incremental_vacuum(conn: &Connection) -> Result<(), NoteDeckError> {
+        // 0 = NONE, 1 = FULL, 2 = INCREMENTAL
+        let current: i64 = conn.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+        if current != 2 {
+            conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
+            // Fresh DB なら以降の write でモードが固定される。既存 DB の場合は
+            // VACUUM 必須 (高コストだが起動 1 回限りの one-shot)。
+            conn.execute_batch("VACUUM;")?;
+        }
+        Ok(())
     }
 
     fn lock_read(&self) -> Result<MutexGuard<'_, Connection>, NoteDeckError> {
@@ -494,8 +526,72 @@ impl Database {
         Ok(notes)
     }
 
-    /// Retained for API compatibility. Notes are now kept indefinitely.
-    pub fn cleanup_cache(&self) -> Result<(), NoteDeckError> {
+    /// `notes_cache` の eviction を実行する。起動時 (`Database::open`) で 1 度だけ
+    /// 呼ばれる前提。以下の 2 段階で削除:
+    ///
+    /// 1. **TTL**: `cached_at < now - NOTES_TTL_DAYS` の行を削除。
+    /// 2. **Per-account hard cap**: アカウントごとに最新 `PER_ACCOUNT_NOTE_LIMIT` 件
+    ///    を残し、それ以外を削除 (cached_at DESC で評価)。
+    ///
+    /// 戻り値は削除した行数。`notes_fts` (FTS5 trigram) は contentless ではなく
+    /// content='notes_cache' なので、`AFTER DELETE` トリガーで連動して掃除される。
+    pub fn cleanup_cache(&self) -> Result<u64, NoteDeckError> {
+        self.cleanup_cache_inner(PER_ACCOUNT_NOTE_LIMIT, NOTES_TTL_DAYS)
+    }
+
+    /// テスト用に閾値を可変にした eviction 本体。production からは
+    /// `cleanup_cache` 経由で定数を渡す。
+    fn cleanup_cache_inner(
+        &self,
+        per_account_limit: i64,
+        ttl_days: i64,
+    ) -> Result<u64, NoteDeckError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let ttl_cutoff = now - ttl_days * 86_400;
+
+        let conn = self.lock_write()?;
+        let tx = conn.unchecked_transaction()?;
+
+        // (1) TTL 切れ行を削除。cached_at は INSERT/UPDATE の都度 now で上書きされる
+        // ので「最後に観測されてから N 日経過」を意味する。
+        let ttl_deleted = tx.execute(
+            "DELETE FROM notes_cache WHERE cached_at < ?1",
+            params![ttl_cutoff],
+        )?;
+
+        // (2) アカウントごとの上限を超えた古い行を削除。SQLite 3.25+ の window
+        // function (ROW_NUMBER OVER PARTITION BY) で 1 クエリで評価。
+        let cap_deleted = tx.execute(
+            "DELETE FROM notes_cache
+             WHERE rowid IN (
+                 SELECT rowid FROM (
+                     SELECT rowid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY account_id
+                                ORDER BY cached_at DESC
+                            ) AS rn
+                     FROM notes_cache
+                 )
+                 WHERE rn > ?1
+             )",
+            params![per_account_limit],
+        )?;
+
+        tx.commit()?;
+        Ok((ttl_deleted + cap_deleted) as u64)
+    }
+
+    /// 1 度に最大 `INCREMENTAL_VACUUM_PAGES_PER_BOOT` ページを `auto_vacuum=INCREMENTAL`
+    /// で返却する。起動時の cleanup 後に呼ぶことで、長期蓄積した free page を
+    /// 段階的にディスクへ返す。実行コストは数ミリ秒オーダー。
+    pub fn incremental_vacuum_step(&self) -> Result<(), NoteDeckError> {
+        let conn = self.lock_write()?;
+        conn.execute_batch(&format!(
+            "PRAGMA incremental_vacuum({INCREMENTAL_VACUUM_PAGES_PER_BOOT});"
+        ))?;
         Ok(())
     }
 
@@ -1081,5 +1177,131 @@ mod tests {
         // Should not return expired entry
         let cached = db.get_cached_summary("https://expired.com").unwrap();
         assert!(cached.is_none());
+    }
+
+    // --- Cache eviction & vacuum tests ---
+
+    fn note_for_account(id: &str, account_id: &str) -> NormalizedNote {
+        let mut n = sample_note(id, "hello");
+        n.account_id = account_id.to_string();
+        n
+    }
+
+    /// notes_cache の cached_at をテスト用に直書きする (既定では now で埋まるため)。
+    fn set_cached_at(db: &Database, note_id: &str, cached_at: i64) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "UPDATE notes_cache SET cached_at = ?1 WHERE note_id = ?2",
+            params![cached_at, note_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_notes_older_than_ttl() {
+        let (_dir, db) = temp_db();
+        db.cache_note(&note_for_account("fresh", "acc-1"), "home")
+            .unwrap();
+        db.cache_note(&note_for_account("stale", "acc-1"), "home")
+            .unwrap();
+        // stale を 10 日前に偽装、TTL = 1 日でカット
+        set_cached_at(&db, "stale", 0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let _ = now; // 参照のみ (cached_at = 0 は十分古い)
+
+        let deleted = db.cleanup_cache_inner(10_000, 1).unwrap();
+        assert_eq!(deleted, 1);
+
+        let remaining: Vec<NormalizedNote> = db.get_cached_timeline("acc-1", "home", 100).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "fresh");
+    }
+
+    #[test]
+    fn cleanup_caps_per_account_count() {
+        let (_dir, db) = temp_db();
+        // 5 件 insert (cached_at は now ですべて同程度)
+        for i in 0..5 {
+            db.cache_note(&note_for_account(&format!("n{i}"), "acc-1"), "home")
+                .unwrap();
+        }
+        // 古い 2 件を 1 時間前に偽装 → cap=3 で削除されるのはこの 2 件
+        set_cached_at(&db, "n0", 1000);
+        set_cached_at(&db, "n1", 1001);
+
+        let deleted = db.cleanup_cache_inner(3, 365_000).unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining: Vec<NormalizedNote> = db.get_cached_timeline("acc-1", "home", 100).unwrap();
+        assert_eq!(remaining.len(), 3);
+        // n0 / n1 (古い) が消えて n2 / n3 / n4 が残る
+        let mut ids: Vec<&str> = remaining.iter().map(|n| n.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["n2", "n3", "n4"]);
+    }
+
+    #[test]
+    fn cleanup_per_account_independent() {
+        let (_dir, db) = temp_db();
+        // acc-1 に 4 件、acc-2 に 2 件
+        for i in 0..4 {
+            db.cache_note(&note_for_account(&format!("a{i}"), "acc-1"), "home")
+                .unwrap();
+        }
+        for i in 0..2 {
+            db.cache_note(&note_for_account(&format!("b{i}"), "acc-2"), "home")
+                .unwrap();
+        }
+        // acc-1 の古い 2 件
+        set_cached_at(&db, "a0", 1000);
+        set_cached_at(&db, "a1", 1001);
+
+        // cap=2: acc-1 は 2 件残り、acc-2 は影響を受けない
+        let deleted = db.cleanup_cache_inner(2, 365_000).unwrap();
+        assert_eq!(deleted, 2);
+
+        assert_eq!(db.account_cache_count("acc-1").unwrap(), 2);
+        assert_eq!(db.account_cache_count("acc-2").unwrap(), 2);
+    }
+
+    #[test]
+    fn cleanup_no_op_when_under_limits() {
+        let (_dir, db) = temp_db();
+        for i in 0..3 {
+            db.cache_note(&note_for_account(&format!("n{i}"), "acc-1"), "home")
+                .unwrap();
+        }
+        let deleted = db.cleanup_cache_inner(100, 365_000).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(db.account_cache_count("acc-1").unwrap(), 3);
+    }
+
+    #[test]
+    fn auto_vacuum_mode_is_incremental_after_open() {
+        let (_dir, db) = temp_db();
+        let conn = db.lock().unwrap();
+        let mode: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .unwrap();
+        // 0 = NONE, 1 = FULL, 2 = INCREMENTAL
+        assert_eq!(mode, 2, "auto_vacuum should be INCREMENTAL");
+    }
+
+    #[test]
+    fn incremental_vacuum_step_runs_without_error() {
+        let (_dir, db) = temp_db();
+        // データ insert → 削除 → free page を生む
+        for i in 0..50 {
+            db.cache_note(&note_for_account(&format!("n{i}"), "acc-1"), "home")
+                .unwrap();
+        }
+        db.clear_all_notes_cache().unwrap();
+        // free page があっても無くてもエラーにならない (PRAGMA は no-op 時 silent)
+        db.incremental_vacuum_step().unwrap();
+        // 2 度呼んでも問題なし
+        db.incremental_vacuum_step().unwrap();
     }
 }
