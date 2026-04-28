@@ -41,15 +41,31 @@ const PRAGMAS_READER: &str = "\
     PRAGMA cache_size=-8000;\
     PRAGMA temp_store=MEMORY;";
 
-/// `notes_cache` のアカウントごとの上限。これを超えると古い順 (cached_at ASC) で
-/// 削除される。長期利用での DB 肥大化を抑える hard cap。
-const PER_ACCOUNT_NOTE_LIMIT: i64 = 50_000;
-/// `notes_cache` の TTL (日)。`cached_at` がこの日数より古い行は削除される。
-/// 鮮度の落ちたデータの自動掃除。
-const NOTES_TTL_DAYS: i64 = 90;
 /// 起動時の `incremental_vacuum` で 1 度に返却する free page の上限。
 /// 大きすぎると起動が遅くなり、小さすぎると free page が溜まり続ける。
 const INCREMENTAL_VACUUM_PAGES_PER_BOOT: i64 = 1000;
+
+/// `notes_cache` の eviction policy。 デフォルトは「ほぼ永続保存」 — notedeck の
+/// 「過去ノートを一瞬でローカル検索」という UX を尊重し、 暴走防止の hard cap
+/// だけを残す。 アプリ側からユーザー設定で上書きできる。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct EvictionConfig {
+    /// 各アカウントごとの note 上限。`None` なら無制限。
+    pub per_account_limit: Option<i64>,
+    /// `cached_at` の TTL (日)。`None` なら無期限保持。
+    pub ttl_days: Option<i64>,
+}
+
+impl Default for EvictionConfig {
+    fn default() -> Self {
+        // 検索 UX を最優先。 暴走防止のため per-account 1M 件で hard cap だけ残す。
+        Self {
+            per_account_limit: Some(1_000_000),
+            ttl_days: None,
+        }
+    }
+}
 
 /// SQLite database with separate reader/writer connections.
 /// WAL mode allows concurrent reads while writing.
@@ -59,7 +75,18 @@ pub struct Database {
 }
 
 impl Database {
+    /// デフォルトの eviction policy で DB を開く。 後方互換性のために維持。
     pub fn open(path: &Path) -> Result<Self, NoteDeckError> {
+        Self::open_with_eviction(path, EvictionConfig::default())
+    }
+
+    /// アプリ側のユーザー設定を反映した eviction policy で DB を開く。
+    /// 起動時の cleanup_cache はこの設定で 1 度だけ走る。 アプリ実行中に設定を
+    /// 変更した場合は `set_eviction` で再 cleanup できる。
+    pub fn open_with_eviction(
+        path: &Path,
+        eviction: EvictionConfig,
+    ) -> Result<Self, NoteDeckError> {
         // Writer connection: migrations, schema changes, inserts/updates/deletes
         let mut writer = Connection::open(path)?;
         writer.execute_batch(PRAGMAS_WRITER)?;
@@ -95,7 +122,7 @@ impl Database {
             writer: Mutex::new(writer),
             reader: Mutex::new(reader),
         };
-        db.cleanup_cache()?;
+        db.cleanup_with_eviction(&eviction)?;
         // cleanup で生まれた free page を少し返却する (起動コスト一定)。
         db.incremental_vacuum_step()?;
         Ok(db)
@@ -526,62 +553,68 @@ impl Database {
         Ok(notes)
     }
 
-    /// `notes_cache` の eviction を実行する。起動時 (`Database::open`) で 1 度だけ
-    /// 呼ばれる前提。以下の 2 段階で削除:
-    ///
-    /// 1. **TTL**: `cached_at < now - NOTES_TTL_DAYS` の行を削除。
-    /// 2. **Per-account hard cap**: アカウントごとに最新 `PER_ACCOUNT_NOTE_LIMIT` 件
-    ///    を残し、それ以外を削除 (cached_at DESC で評価)。
-    ///
-    /// 戻り値は削除した行数。`notes_fts` (FTS5 trigram) は contentless ではなく
-    /// content='notes_cache' なので、`AFTER DELETE` トリガーで連動して掃除される。
+    /// `notes_cache` の eviction を `EvictionConfig::default()` で実行する。
+    /// 後方互換性のために維持。 アプリ側はユーザー設定を反映するため
+    /// `cleanup_with_eviction` を直接呼ぶ。
     pub fn cleanup_cache(&self) -> Result<u64, NoteDeckError> {
-        self.cleanup_cache_inner(PER_ACCOUNT_NOTE_LIMIT, NOTES_TTL_DAYS)
+        self.cleanup_with_eviction(&EvictionConfig::default())
     }
 
-    /// テスト用に閾値を可変にした eviction 本体。production からは
-    /// `cleanup_cache` 経由で定数を渡す。
-    fn cleanup_cache_inner(
-        &self,
-        per_account_limit: i64,
-        ttl_days: i64,
-    ) -> Result<u64, NoteDeckError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let ttl_cutoff = now - ttl_days * 86_400;
+    /// 設定を渡して eviction を実行する。 `None` のフィールドは「制限なし」と
+    /// して該当する DELETE をスキップする。 アプリ実行中に設定を変えた直後にも
+    /// 呼ぶ想定 (UI から「すぐ反映」 ボタン等)。
+    ///
+    /// 削除順:
+    /// 1. **TTL**: `cached_at < now - ttl_days` の行を削除 (`ttl_days = None` ならスキップ)。
+    /// 2. **Per-account hard cap**: アカウントごとに最新 `per_account_limit` 件を
+    ///    残し、それ以外を削除 (`per_account_limit = None` ならスキップ)。
+    ///
+    /// 戻り値は削除した行数。`notes_fts` は `AFTER DELETE` トリガーで連動掃除される。
+    pub fn cleanup_with_eviction(&self, config: &EvictionConfig) -> Result<u64, NoteDeckError> {
+        // どちらも無効なら早期 return (lock も取らない)。
+        if config.per_account_limit.is_none() && config.ttl_days.is_none() {
+            return Ok(0);
+        }
 
         let conn = self.lock_write()?;
         let tx = conn.unchecked_transaction()?;
+        let mut total_deleted: u64 = 0;
 
-        // (1) TTL 切れ行を削除。cached_at は INSERT/UPDATE の都度 now で上書きされる
-        // ので「最後に観測されてから N 日経過」を意味する。
-        let ttl_deleted = tx.execute(
-            "DELETE FROM notes_cache WHERE cached_at < ?1",
-            params![ttl_cutoff],
-        )?;
+        if let Some(ttl_days) = config.ttl_days {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let ttl_cutoff = now - ttl_days * 86_400;
+            let n = tx.execute(
+                "DELETE FROM notes_cache WHERE cached_at < ?1",
+                params![ttl_cutoff],
+            )?;
+            total_deleted += n as u64;
+        }
 
-        // (2) アカウントごとの上限を超えた古い行を削除。SQLite 3.25+ の window
-        // function (ROW_NUMBER OVER PARTITION BY) で 1 クエリで評価。
-        let cap_deleted = tx.execute(
-            "DELETE FROM notes_cache
-             WHERE rowid IN (
-                 SELECT rowid FROM (
-                     SELECT rowid,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY account_id
-                                ORDER BY cached_at DESC
-                            ) AS rn
-                     FROM notes_cache
-                 )
-                 WHERE rn > ?1
-             )",
-            params![per_account_limit],
-        )?;
+        if let Some(per_account_limit) = config.per_account_limit {
+            // SQLite 3.25+ の window function で 1 クエリで評価。
+            let n = tx.execute(
+                "DELETE FROM notes_cache
+                 WHERE rowid IN (
+                     SELECT rowid FROM (
+                         SELECT rowid,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY account_id
+                                    ORDER BY cached_at DESC
+                                ) AS rn
+                         FROM notes_cache
+                     )
+                     WHERE rn > ?1
+                 )",
+                params![per_account_limit],
+            )?;
+            total_deleted += n as u64;
+        }
 
         tx.commit()?;
-        Ok((ttl_deleted + cap_deleted) as u64)
+        Ok(total_deleted)
     }
 
     /// 1 度に最大 `INCREMENTAL_VACUUM_PAGES_PER_BOOT` ページを `auto_vacuum=INCREMENTAL`
@@ -1212,7 +1245,11 @@ mod tests {
             .as_secs() as i64;
         let _ = now; // 参照のみ (cached_at = 0 は十分古い)
 
-        let deleted = db.cleanup_cache_inner(10_000, 1).unwrap();
+        let cfg = EvictionConfig {
+            per_account_limit: Some(10_000),
+            ttl_days: Some(1),
+        };
+        let deleted = db.cleanup_with_eviction(&cfg).unwrap();
         assert_eq!(deleted, 1);
 
         let remaining: Vec<NormalizedNote> = db.get_cached_timeline("acc-1", "home", 100).unwrap();
@@ -1232,7 +1269,11 @@ mod tests {
         set_cached_at(&db, "n0", 1000);
         set_cached_at(&db, "n1", 1001);
 
-        let deleted = db.cleanup_cache_inner(3, 365_000).unwrap();
+        let cfg = EvictionConfig {
+            per_account_limit: Some(3),
+            ttl_days: None, // TTL 無効で件数だけテスト
+        };
+        let deleted = db.cleanup_with_eviction(&cfg).unwrap();
         assert_eq!(deleted, 2);
 
         let remaining: Vec<NormalizedNote> = db.get_cached_timeline("acc-1", "home", 100).unwrap();
@@ -1260,7 +1301,11 @@ mod tests {
         set_cached_at(&db, "a1", 1001);
 
         // cap=2: acc-1 は 2 件残り、acc-2 は影響を受けない
-        let deleted = db.cleanup_cache_inner(2, 365_000).unwrap();
+        let cfg = EvictionConfig {
+            per_account_limit: Some(2),
+            ttl_days: None,
+        };
+        let deleted = db.cleanup_with_eviction(&cfg).unwrap();
         assert_eq!(deleted, 2);
 
         assert_eq!(db.account_cache_count("acc-1").unwrap(), 2);
@@ -1274,9 +1319,56 @@ mod tests {
             db.cache_note(&note_for_account(&format!("n{i}"), "acc-1"), "home")
                 .unwrap();
         }
-        let deleted = db.cleanup_cache_inner(100, 365_000).unwrap();
+        let cfg = EvictionConfig {
+            per_account_limit: Some(100),
+            ttl_days: None,
+        };
+        let deleted = db.cleanup_with_eviction(&cfg).unwrap();
         assert_eq!(deleted, 0);
         assert_eq!(db.account_cache_count("acc-1").unwrap(), 3);
+    }
+
+    #[test]
+    fn cleanup_with_both_disabled_is_pure_noop() {
+        let (_dir, db) = temp_db();
+        for i in 0..3 {
+            db.cache_note(&note_for_account(&format!("n{i}"), "acc-1"), "home")
+                .unwrap();
+        }
+        // ttl_days=None かつ per_account_limit=None: ロックを取らずに 0 を返す。
+        // 検索 UX 優先のデフォルトに近いケースをカバー。
+        let cfg = EvictionConfig {
+            per_account_limit: None,
+            ttl_days: None,
+        };
+        let deleted = db.cleanup_with_eviction(&cfg).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(db.account_cache_count("acc-1").unwrap(), 3);
+    }
+
+    #[test]
+    fn cleanup_only_ttl_keeps_high_count() {
+        let (_dir, db) = temp_db();
+        for i in 0..5 {
+            db.cache_note(&note_for_account(&format!("n{i}"), "acc-1"), "home")
+                .unwrap();
+        }
+        // 5 件すべてが新しいので、TTL=1 でも何も消えない (cap は無効)
+        let cfg = EvictionConfig {
+            per_account_limit: None,
+            ttl_days: Some(1),
+        };
+        let deleted = db.cleanup_with_eviction(&cfg).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(db.account_cache_count("acc-1").unwrap(), 5);
+    }
+
+    #[test]
+    fn default_config_is_lenient() {
+        // 検索 UX を尊重するため、デフォルト設定では実質的に何も削除されない。
+        let cfg = EvictionConfig::default();
+        assert_eq!(cfg.per_account_limit, Some(1_000_000));
+        assert_eq!(cfg.ttl_days, None);
     }
 
     #[test]
