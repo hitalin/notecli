@@ -275,6 +275,8 @@ pub struct NormalizedUserDetail {
     pub following_visibility: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub followers_visibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub followed_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1166,6 +1168,7 @@ pub struct RawUserDetail {
     pub following_visibility: Option<String>,
     #[serde(default)]
     pub followers_visibility: Option<String>,
+    pub followed_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1389,6 +1392,7 @@ impl RawUserDetail {
             online_status: self.online_status,
             following_visibility: self.following_visibility,
             followers_visibility: self.followers_visibility,
+            followed_message: self.followed_message,
         }
     }
 }
