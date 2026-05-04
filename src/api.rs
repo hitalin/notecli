@@ -1084,6 +1084,17 @@ impl MisskeyClient {
         Ok(())
     }
 
+    pub async fn invalidate_follower(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "following/invalidate", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
     pub async fn accept_follow_request(
         &self,
         host: &str,
@@ -1971,6 +1982,28 @@ impl MisskeyClient {
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
         self.request(host, token, "mute/delete", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn renote_mute_user(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "renote-mute/create", json!({ "userId": user_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unrenote_mute_user(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(host, token, "renote-mute/delete", json!({ "userId": user_id }))
             .await?;
         Ok(())
     }
