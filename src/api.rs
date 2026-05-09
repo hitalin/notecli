@@ -2004,21 +2004,6 @@ impl MisskeyClient {
         Ok(message)
     }
 
-    // --- Legacy messaging ---
-
-    pub async fn create_messaging_message(
-        &self,
-        host: &str,
-        token: &str,
-        params: Value,
-    ) -> Result<ChatMessage, NoteDeckError> {
-        let data = self
-            .request(host, token, "messaging/messages/create", params)
-            .await?;
-        let message: ChatMessage = serde_json::from_value(data)?;
-        Ok(message)
-    }
-
     // --- Server Discovery (unauthenticated) ---
 
     /// Fetch nodeinfo via .well-known/nodeinfo.
