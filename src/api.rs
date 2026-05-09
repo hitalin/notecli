@@ -1559,6 +1559,27 @@ impl MisskeyClient {
         Ok(())
     }
 
+    /// Misskey 新 Chat API (#15686) の `chat/messages/delete`。
+    /// ハード削除されるので `deletedAt` 等は無く、サーバー側からは
+    /// WS `chat:deleted` event がブロードキャストされる。それを受けて
+    /// `streaming.rs` 側でローカル `chat_messages_cache` も自動的に
+    /// 消える経路があるため、呼び出し側でキャッシュ削除を別途行う必要はない。
+    pub async fn delete_chat_message(
+        &self,
+        host: &str,
+        token: &str,
+        message_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "chat/messages/delete",
+            json!({ "messageId": message_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
     // --- Search ---
 
     pub async fn search_users_by_query(
