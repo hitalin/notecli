@@ -1953,39 +1953,52 @@ impl MisskeyClient {
         }
     }
 
+    /// Misskey 新 Chat API (#15686) `chat/messages/create-to-user`。
+    ///
+    /// `text` と `file_id` の両方を `Option<&str>` で受け取り、None の場合は
+    /// JSON body から省く。Misskey 側のスキーマも nullable で、サーバ側で
+    /// 「どちらか一方は必須」のバリデーションが走る。
     pub async fn create_chat_message_to_user(
         &self,
         host: &str,
         token: &str,
         user_id: &str,
-        text: &str,
+        text: Option<&str>,
+        file_id: Option<&str>,
     ) -> Result<ChatMessage, NoteDeckError> {
+        let mut body = json!({ "toUserId": user_id });
+        if let Some(t) = text {
+            body["text"] = json!(t);
+        }
+        if let Some(fid) = file_id {
+            body["fileId"] = json!(fid);
+        }
         let data = self
-            .request(
-                host,
-                token,
-                "chat/messages/create-to-user",
-                json!({ "userId": user_id, "text": text }),
-            )
+            .request(host, token, "chat/messages/create-to-user", body)
             .await?;
         let message: ChatMessage = serde_json::from_value(data)?;
         Ok(message)
     }
 
+    /// Misskey 新 Chat API (#15686) `chat/messages/create-to-room`。
+    /// `create_chat_message_to_user` と同じ optional ルール。
     pub async fn create_chat_message_to_room(
         &self,
         host: &str,
         token: &str,
         room_id: &str,
-        text: &str,
+        text: Option<&str>,
+        file_id: Option<&str>,
     ) -> Result<ChatMessage, NoteDeckError> {
+        let mut body = json!({ "toRoomId": room_id });
+        if let Some(t) = text {
+            body["text"] = json!(t);
+        }
+        if let Some(fid) = file_id {
+            body["fileId"] = json!(fid);
+        }
         let data = self
-            .request(
-                host,
-                token,
-                "chat/messages/create-to-room",
-                json!({ "roomId": room_id, "text": text }),
-            )
+            .request(host, token, "chat/messages/create-to-room", body)
             .await?;
         let message: ChatMessage = serde_json::from_value(data)?;
         Ok(message)
