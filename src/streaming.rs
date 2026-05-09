@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -14,8 +14,8 @@ use crate::db::Database;
 use crate::error::NoteDeckError;
 use crate::event_bus::{EventBus, SseEvent};
 use crate::models::{
-    ChatMessage, NormalizedNote, NormalizedNotification, RawNote, RawNotification, TimelineType,
-    TimelineOptions,
+    ChatMessage, ChatReactionUser, NormalizedNote, NormalizedNotification, RawNote,
+    RawNotification, TimelineOptions, TimelineType,
 };
 
 /// Trait for emitting events to a frontend (e.g., Tauri WebView).
@@ -123,6 +123,37 @@ pub struct StreamChatMessageDeletedEvent {
     pub account_id: String,
     pub subscription_id: String,
     pub message_id: String,
+}
+
+/// WS payload for `chat:react` / `chat:unreact` (deserialize 用)。
+/// Misskey の `ChatEventTypes` より:
+/// `react: { reaction, user?, messageId }` — `messageId` の型は string。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatReactionWsBody {
+    message_id: String,
+    reaction: String,
+    user: Option<ChatReactionUser>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamChatMessageReactedEvent {
+    pub account_id: String,
+    pub subscription_id: String,
+    pub message_id: String,
+    pub reaction: String,
+    pub user: Option<ChatReactionUser>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamChatMessageUnreactedEvent {
+    pub account_id: String,
+    pub subscription_id: String,
+    pub message_id: String,
+    pub reaction: String,
+    pub user: Option<ChatReactionUser>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1188,6 +1219,24 @@ async fn handle_ws_message(
     } else if kind == "chat" {
         if event_type == "message" {
             if let Ok(msg) = serde_json::from_value::<ChatMessage>(event_body) {
+                // DB upsert (fire-and-forget)。`account_user_id` は DM partner 計算に必要。
+                if let Ok(Some(account)) = db.get_account(account_id) {
+                    let db = db.clone();
+                    let msg_for_cache = msg.clone();
+                    let account_id_owned = account_id.to_string();
+                    let host_owned = host.clone();
+                    let user_id = account.user_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = db.cache_chat_message(
+                            &msg_for_cache,
+                            &account_id_owned,
+                            &user_id,
+                            &host_owned,
+                        ) {
+                            tracing::warn!(error = %e, "failed to cache streamed chat message");
+                        }
+                    });
+                }
                 let payload = StreamChatMessageEvent {
                     account_id: account_id.to_string(),
                     subscription_id: sub_id,
@@ -1197,12 +1246,82 @@ async fn handle_ws_message(
             }
         } else if event_type == "deleted" {
             if let Some(id) = event_body.as_str() {
+                let id_owned = id.to_string();
+                {
+                    let db = db.clone();
+                    let account_id_owned = account_id.to_string();
+                    let id_for_db = id_owned.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = db.delete_cached_chat_message(&account_id_owned, &id_for_db)
+                        {
+                            tracing::warn!(error = %e, "failed to delete cached chat message");
+                        }
+                    });
+                }
                 let payload = StreamChatMessageDeletedEvent {
                     account_id: account_id.to_string(),
                     subscription_id: sub_id,
-                    message_id: id.to_string(),
+                    message_id: id_owned,
                 };
-                emit_event!(emitter, event_bus, "chat-deleted", "stream-chat-message-deleted", payload);
+                emit_event!(
+                    emitter,
+                    event_bus,
+                    "chat-deleted",
+                    "stream-chat-message-deleted",
+                    payload
+                );
+            }
+        } else if event_type == "react" || event_type == "unreact" {
+            let is_react = event_type == "react";
+            if let Ok(body) = serde_json::from_value::<ChatReactionWsBody>(event_body) {
+                if let Some(user) = body.user.clone() {
+                    let db = db.clone();
+                    let account_id_owned = account_id.to_string();
+                    let message_id = body.message_id.clone();
+                    let reaction = body.reaction.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = db.apply_chat_message_reaction(
+                            &account_id_owned,
+                            &message_id,
+                            &user,
+                            &reaction,
+                            is_react,
+                        ) {
+                            tracing::warn!(error = %e, "failed to apply chat reaction to cache");
+                        }
+                    });
+                }
+                if is_react {
+                    let payload = StreamChatMessageReactedEvent {
+                        account_id: account_id.to_string(),
+                        subscription_id: sub_id,
+                        message_id: body.message_id,
+                        reaction: body.reaction,
+                        user: body.user,
+                    };
+                    emit_event!(
+                        emitter,
+                        event_bus,
+                        "chat-reacted",
+                        "stream-chat-message-reacted",
+                        payload
+                    );
+                } else {
+                    let payload = StreamChatMessageUnreactedEvent {
+                        account_id: account_id.to_string(),
+                        subscription_id: sub_id,
+                        message_id: body.message_id,
+                        reaction: body.reaction,
+                        user: body.user,
+                    };
+                    emit_event!(
+                        emitter,
+                        event_bus,
+                        "chat-unreacted",
+                        "stream-chat-message-unreacted",
+                        payload
+                    );
+                }
             }
         }
     }

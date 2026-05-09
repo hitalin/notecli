@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::NoteDeckError;
-use crate::models::{Account, NormalizedNote, StoredServer};
+use crate::models::{
+    Account, ChatMessage, ChatMessageReaction, ChatReactionUser, NormalizedNote, StoredServer,
+};
 
 mod embedded {
     use refinery::embed_migrations;
@@ -68,6 +70,26 @@ impl Default for EvictionConfig {
     }
 }
 
+/// `chat_messages_cache` の eviction policy。`EvictionConfig` (notes 用) と独立して
+/// 制御できるよう別 struct で管理する。デフォルトは notes と同じ「per-account 1M 件
+/// hard cap、TTL なし」(チャット履歴の永続性を尊重 — 設計判断は notedeck #460)。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct ChatEvictionConfig {
+    pub per_account_limit: Option<i64>,
+    pub ttl_days: Option<i64>,
+}
+
+impl Default for ChatEvictionConfig {
+    fn default() -> Self {
+        Self {
+            per_account_limit: Some(1_000_000),
+            ttl_days: None,
+        }
+    }
+}
+
 /// SQLite database with separate reader/writer connections.
 /// WAL mode allows concurrent reads while writing.
 pub struct Database {
@@ -81,12 +103,23 @@ impl Database {
         Self::open_with_eviction(path, EvictionConfig::default())
     }
 
-    /// アプリ側のユーザー設定を反映した eviction policy で DB を開く。
-    /// 起動時の cleanup_cache はこの設定で 1 度だけ走る。 アプリ実行中に設定を
-    /// 変更した場合は `set_eviction` で再 cleanup できる。
+    /// アプリ側のユーザー設定を反映した notes 用 eviction policy で DB を開く。
+    /// `chat_messages_cache` 側はデフォルトで開く。後方互換のために維持。
     pub fn open_with_eviction(
         path: &Path,
         eviction: EvictionConfig,
+    ) -> Result<Self, NoteDeckError> {
+        Self::open_with_evictions(path, eviction, ChatEvictionConfig::default())
+    }
+
+    /// notes と chat の両方に独立した eviction policy を適用して DB を開く。
+    /// 起動時の cleanup はこの設定で 1 度だけ走る。 アプリ実行中に設定を
+    /// 変更した場合は `cleanup_with_eviction` / `cleanup_chat_with_eviction` で
+    /// 再 cleanup できる。
+    pub fn open_with_evictions(
+        path: &Path,
+        notes_eviction: EvictionConfig,
+        chat_eviction: ChatEvictionConfig,
     ) -> Result<Self, NoteDeckError> {
         // Writer connection: migrations, schema changes, inserts/updates/deletes
         let mut writer = Connection::open(path)?;
@@ -123,7 +156,8 @@ impl Database {
             writer: Mutex::new(writer),
             reader: Mutex::new(reader),
         };
-        db.cleanup_with_eviction(&eviction)?;
+        db.cleanup_with_eviction(&notes_eviction)?;
+        db.cleanup_chat_with_eviction(&chat_eviction)?;
         // cleanup で生まれた free page を少し返却する (起動コスト一定)。
         db.incremental_vacuum_step()?;
         Ok(db)
@@ -281,6 +315,10 @@ impl Database {
     pub fn delete_account(&self, id: &str) -> Result<(), NoteDeckError> {
         let conn = self.lock_write()?;
         conn.execute("DELETE FROM notes_cache WHERE account_id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM chat_messages_cache WHERE account_id = ?1",
+            params![id],
+        )?;
         conn.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -850,6 +888,372 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // --- Chat messages cache ---
+
+    /// `ChatMessage` から `(thread_id, thread_kind)` を導出する。
+    /// DM の partner は `from_user_id == account_user_id ? to_user_id : from_user_id` で計算。
+    /// `to_user_id` も `to_room_id` も無い (= 不正な msg) 場合は `None` を返す → caller は skip。
+    pub(crate) fn derive_thread_key(
+        msg: &ChatMessage,
+        account_user_id: &str,
+    ) -> Option<(String, &'static str)> {
+        if let Some(room_id) = &msg.to_room_id {
+            return Some((format!("r:{room_id}"), "room"));
+        }
+        if let Some(to_user_id) = &msg.to_user_id {
+            let partner = if msg.from_user_id == account_user_id {
+                to_user_id
+            } else {
+                &msg.from_user_id
+            };
+            return Some((format!("u:{partner}"), "dm"));
+        }
+        None
+    }
+
+    fn row_to_chat_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
+        let json: String = row.get(0)?;
+        serde_json::from_str(&json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
+    }
+
+    /// 複数の chat メッセージを upsert する。`account_user_id` は DM の partner 判定に使う。
+    /// 戻り値は実際に書き込まれた行数 (thread が決定できなかった msg は skip)。
+    pub fn cache_chat_messages(
+        &self,
+        msgs: &[ChatMessage],
+        account_id: &str,
+        account_user_id: &str,
+        server_host: &str,
+    ) -> Result<usize, NoteDeckError> {
+        if msgs.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock_write()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let tx = conn.unchecked_transaction()?;
+        let mut written = 0usize;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO chat_messages_cache (
+                    message_id, account_id, server_host, thread_id, thread_kind,
+                    from_user_id, created_at, message_json, cached_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(message_id, account_id) DO UPDATE SET
+                     thread_id = excluded.thread_id,
+                     thread_kind = excluded.thread_kind,
+                     from_user_id = excluded.from_user_id,
+                     created_at = excluded.created_at,
+                     message_json = excluded.message_json,
+                     cached_at = excluded.cached_at",
+            )?;
+            for msg in msgs {
+                let Some((thread_id, thread_kind)) = Self::derive_thread_key(msg, account_user_id)
+                else {
+                    continue;
+                };
+                let json = serde_json::to_string(msg).unwrap_or_default();
+                stmt.execute(params![
+                    msg.id,
+                    account_id,
+                    server_host,
+                    thread_id,
+                    thread_kind,
+                    msg.from_user_id,
+                    msg.created_at,
+                    json,
+                    now,
+                ])?;
+                written += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(written)
+    }
+
+    /// 単一 chat メッセージの upsert。`cache_chat_messages` の thin wrapper。
+    pub fn cache_chat_message(
+        &self,
+        msg: &ChatMessage,
+        account_id: &str,
+        account_user_id: &str,
+        server_host: &str,
+    ) -> Result<bool, NoteDeckError> {
+        let written = self.cache_chat_messages(
+            std::slice::from_ref(msg),
+            account_id,
+            account_user_id,
+            server_host,
+        )?;
+        Ok(written > 0)
+    }
+
+    /// WS `chat:deleted` event 受信時など、特定メッセージを cache から消す。
+    pub fn delete_cached_chat_message(
+        &self,
+        account_id: &str,
+        message_id: &str,
+    ) -> Result<bool, NoteDeckError> {
+        let conn = self.lock_write()?;
+        let n = conn.execute(
+            "DELETE FROM chat_messages_cache WHERE account_id = ?1 AND message_id = ?2",
+            params![account_id, message_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// WS `chat:react` / `chat:unreact` event を atomic に適用する。
+    /// 該当 message が DB に無ければ何もしない (`Ok(false)`)。
+    /// `is_react = true` で追加、`false` で削除 ((reactor.id, reaction) の最初の 1 件)。
+    pub fn apply_chat_message_reaction(
+        &self,
+        account_id: &str,
+        message_id: &str,
+        reactor: &ChatReactionUser,
+        reaction: &str,
+        is_react: bool,
+    ) -> Result<bool, NoteDeckError> {
+        let conn = self.lock_write()?;
+        let tx = conn.unchecked_transaction()?;
+        let json: Option<String> = tx
+            .query_row(
+                "SELECT message_json FROM chat_messages_cache WHERE account_id = ?1 AND message_id = ?2",
+                params![account_id, message_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(json) = json else {
+            return Ok(false);
+        };
+        let mut msg: ChatMessage = match serde_json::from_str(&json) {
+            Ok(m) => m,
+            Err(_) => return Ok(false),
+        };
+        if is_react {
+            msg.reactions.push(ChatMessageReaction {
+                user: Some(reactor.clone()),
+                reaction: reaction.to_string(),
+            });
+        } else {
+            // (user_id, reaction) が一致する最初の 1 件を削除。
+            if let Some(pos) = msg.reactions.iter().position(|r| {
+                r.reaction == reaction
+                    && r.user.as_ref().map(|u| u.id.as_str()) == Some(reactor.id.as_str())
+            }) {
+                msg.reactions.remove(pos);
+            } else {
+                return Ok(false);
+            }
+        }
+        let new_json = serde_json::to_string(&msg).unwrap_or(json);
+        let n = tx.execute(
+            "UPDATE chat_messages_cache SET message_json = ?1
+             WHERE account_id = ?2 AND message_id = ?3",
+            params![new_json, account_id, message_id],
+        )?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    /// History view 用: 各 thread の最新 1 件を返す (`limit` 件まで)。
+    pub fn get_cached_chat_history(
+        &self,
+        account_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ChatMessage>, NoteDeckError> {
+        let conn = self.lock_read()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT message_json FROM chat_messages_cache
+             WHERE rowid IN (
+                 SELECT rowid FROM (
+                     SELECT rowid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY thread_id
+                                ORDER BY created_at DESC
+                            ) AS rn
+                     FROM chat_messages_cache
+                     WHERE account_id = ?1
+                 )
+                 WHERE rn = 1
+             )
+             ORDER BY created_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![account_id, limit], Self::row_to_chat_message)?;
+        let mut msgs = Vec::new();
+        for row in rows {
+            if let Ok(m) = row {
+                msgs.push(m);
+            }
+        }
+        Ok(msgs)
+    }
+
+    /// thread タイムライン用: 指定 thread の messages を created_at 降順で返す。
+    /// `until_id` を指定した場合、その message 以前 (created_at が小さい) を返す。
+    pub fn get_cached_chat_thread_messages(
+        &self,
+        account_id: &str,
+        thread_id: &str,
+        until_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ChatMessage>, NoteDeckError> {
+        let conn = self.lock_read()?;
+        let msgs = if let Some(until_id) = until_id {
+            // until_id の created_at を取得して、それ以前を返す。
+            let until_at: Option<String> = conn
+                .query_row(
+                    "SELECT created_at FROM chat_messages_cache
+                     WHERE account_id = ?1 AND message_id = ?2",
+                    params![account_id, until_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            let Some(until_at) = until_at else {
+                return Ok(Vec::new());
+            };
+            let mut stmt = conn.prepare_cached(
+                "SELECT message_json FROM chat_messages_cache
+                 WHERE account_id = ?1 AND thread_id = ?2 AND created_at < ?3
+                 ORDER BY created_at DESC
+                 LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                params![account_id, thread_id, until_at, limit],
+                Self::row_to_chat_message,
+            )?;
+            rows.filter_map(|r| r.ok()).collect()
+        } else {
+            let mut stmt = conn.prepare_cached(
+                "SELECT message_json FROM chat_messages_cache
+                 WHERE account_id = ?1 AND thread_id = ?2
+                 ORDER BY created_at DESC
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(
+                params![account_id, thread_id, limit],
+                Self::row_to_chat_message,
+            )?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        Ok(msgs)
+    }
+
+    /// Gap 検出用: 指定 thread の最新 message id を返す (since_id 計算)。
+    pub fn get_cached_chat_latest_message_id(
+        &self,
+        account_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<String>, NoteDeckError> {
+        let conn = self.lock_read()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT message_id FROM chat_messages_cache
+             WHERE account_id = ?1 AND thread_id = ?2
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![account_id, thread_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `chat_messages_cache` の eviction を実行する。設計は `cleanup_with_eviction` と同形。
+    pub fn cleanup_chat_with_eviction(
+        &self,
+        config: &ChatEvictionConfig,
+    ) -> Result<u64, NoteDeckError> {
+        if config.per_account_limit.is_none() && config.ttl_days.is_none() {
+            return Ok(0);
+        }
+
+        let conn = self.lock_write()?;
+        let tx = conn.unchecked_transaction()?;
+        let mut total_deleted: u64 = 0;
+
+        if let Some(ttl_days) = config.ttl_days {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let ttl_cutoff = now - ttl_days * 86_400;
+            let n = tx.execute(
+                "DELETE FROM chat_messages_cache WHERE cached_at < ?1",
+                params![ttl_cutoff],
+            )?;
+            total_deleted += n as u64;
+        }
+
+        if let Some(per_account_limit) = config.per_account_limit {
+            let n = tx.execute(
+                "DELETE FROM chat_messages_cache
+                 WHERE rowid IN (
+                     SELECT rowid FROM (
+                         SELECT rowid,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY account_id
+                                    ORDER BY cached_at DESC
+                                ) AS rn
+                         FROM chat_messages_cache
+                     )
+                     WHERE rn > ?1
+                 )",
+                params![per_account_limit],
+            )?;
+            total_deleted += n as u64;
+        }
+
+        tx.commit()?;
+        Ok(total_deleted)
+    }
+
+    /// 指定アカウントの chat メッセージをすべて削除。
+    pub fn clear_chat_cache_for_account(&self, account_id: &str) -> Result<u64, NoteDeckError> {
+        let conn = self.lock_write()?;
+        let deleted = conn.execute(
+            "DELETE FROM chat_messages_cache WHERE account_id = ?1",
+            params![account_id],
+        )?;
+        Ok(deleted as u64)
+    }
+
+    /// 指定アカウントの chat メッセージ件数。
+    pub fn chat_cache_count(&self, account_id: &str) -> Result<i64, NoteDeckError> {
+        let conn = self.lock_read()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM chat_messages_cache WHERE account_id = ?1",
+            params![account_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// `chat_messages_cache` の (件数, 概算バイト数) を返す。
+    /// バイト数は DB 全体の page_count*page_size を返す `cache_stats` と異なり、
+    /// `pgsize` を行単位に積んで概算する。
+    pub fn chat_cache_stats(&self) -> Result<(i64, i64), NoteDeckError> {
+        let conn = self.lock_read()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM chat_messages_cache", [], |row| {
+            row.get(0)
+        })?;
+        let bytes: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM chat_messages_cache",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok((count, bytes))
+    }
 }
 
 #[cfg(test)]
@@ -885,6 +1289,7 @@ mod tests {
         assert!(tables.contains(&"servers".to_string()));
         assert!(tables.contains(&"notes_cache".to_string()));
         assert!(tables.contains(&"ogp_cache".to_string()));
+        assert!(tables.contains(&"chat_messages_cache".to_string()));
         assert!(tables.contains(&"refinery_schema_history".to_string()));
     }
 
@@ -1396,5 +1801,359 @@ mod tests {
         db.incremental_vacuum_step().unwrap();
         // 2 度呼んでも問題なし
         db.incremental_vacuum_step().unwrap();
+    }
+
+    // --- Chat messages cache tests ---
+
+    use crate::models::{ChatMessage, ChatMessageReaction, ChatReactionUser};
+
+    fn dm_msg(id: &str, from: &str, to: &str, text: &str, created_at: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.to_string(),
+            created_at: created_at.to_string(),
+            from_user_id: from.to_string(),
+            from_user: None,
+            to_user_id: Some(to.to_string()),
+            to_user: None,
+            to_room_id: None,
+            to_room: None,
+            text: Some(text.to_string()),
+            file_id: None,
+            file: None,
+            is_read: Some(false),
+            reactions: Vec::new(),
+        }
+    }
+
+    fn room_msg(id: &str, from: &str, room: &str, text: &str, created_at: &str) -> ChatMessage {
+        ChatMessage {
+            id: id.to_string(),
+            created_at: created_at.to_string(),
+            from_user_id: from.to_string(),
+            from_user: None,
+            to_user_id: None,
+            to_user: None,
+            to_room_id: Some(room.to_string()),
+            to_room: None,
+            text: Some(text.to_string()),
+            file_id: None,
+            file: None,
+            is_read: Some(false),
+            reactions: Vec::new(),
+        }
+    }
+
+    fn reactor(id: &str, username: &str) -> ChatReactionUser {
+        ChatReactionUser {
+            id: id.to_string(),
+            name: None,
+            username: username.to_string(),
+            host: None,
+            avatar_url: None,
+        }
+    }
+
+    #[test]
+    fn derive_thread_key_dm_partner_is_other_side() {
+        // 自分が send 側: partner は to_user_id
+        let msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        let (tid, kind) = Database::derive_thread_key(&msg, "me").unwrap();
+        assert_eq!(tid, "u:alice");
+        assert_eq!(kind, "dm");
+        // 自分が receive 側: partner は from_user_id
+        let msg = dm_msg("m2", "alice", "me", "yo", "2026-05-01T00:01:00Z");
+        let (tid, kind) = Database::derive_thread_key(&msg, "me").unwrap();
+        assert_eq!(tid, "u:alice");
+        assert_eq!(kind, "dm");
+    }
+
+    #[test]
+    fn derive_thread_key_room_uses_room_id() {
+        let msg = room_msg("m3", "alice", "room42", "hello", "2026-05-01T00:00:00Z");
+        let (tid, kind) = Database::derive_thread_key(&msg, "me").unwrap();
+        assert_eq!(tid, "r:room42");
+        assert_eq!(kind, "room");
+    }
+
+    #[test]
+    fn derive_thread_key_returns_none_for_invalid_msg() {
+        let msg = ChatMessage {
+            id: "m4".to_string(),
+            created_at: "2026-05-01T00:00:00Z".to_string(),
+            from_user_id: "alice".to_string(),
+            from_user: None,
+            to_user_id: None,
+            to_user: None,
+            to_room_id: None,
+            to_room: None,
+            text: None,
+            file_id: None,
+            file: None,
+            is_read: None,
+            reactions: Vec::new(),
+        };
+        assert!(Database::derive_thread_key(&msg, "me").is_none());
+    }
+
+    #[test]
+    fn cache_chat_message_dm_and_retrieve() {
+        let (_dir, db) = temp_db();
+        let msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        let written = db
+            .cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+        assert!(written);
+
+        let history = db.get_cached_chat_history("acc-1", 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, "m1");
+
+        let thread = db
+            .get_cached_chat_thread_messages("acc-1", "u:alice", None, 10)
+            .unwrap();
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].id, "m1");
+    }
+
+    #[test]
+    fn cache_chat_message_room_and_retrieve() {
+        let (_dir, db) = temp_db();
+        let msg = room_msg("m1", "alice", "room42", "hello", "2026-05-01T00:00:00Z");
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+
+        let thread = db
+            .get_cached_chat_thread_messages("acc-1", "r:room42", None, 10)
+            .unwrap();
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].id, "m1");
+    }
+
+    #[test]
+    fn cache_chat_message_skips_invalid() {
+        let (_dir, db) = temp_db();
+        let invalid = ChatMessage {
+            id: "m1".to_string(),
+            created_at: "2026-05-01T00:00:00Z".to_string(),
+            from_user_id: "alice".to_string(),
+            from_user: None,
+            to_user_id: None,
+            to_user: None,
+            to_room_id: None,
+            to_room: None,
+            text: None,
+            file_id: None,
+            file: None,
+            is_read: None,
+            reactions: Vec::new(),
+        };
+        let written = db
+            .cache_chat_message(&invalid, "acc-1", "me", "example.com")
+            .unwrap();
+        assert!(!written);
+        assert_eq!(db.chat_cache_count("acc-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn chat_history_returns_one_per_thread() {
+        let (_dir, db) = temp_db();
+        // 同じ DM thread で 5 件、別 thread で 1 件
+        for i in 0..5 {
+            let ts = format!("2026-05-01T00:0{i}:00Z");
+            let m = dm_msg(&format!("dm{i}"), "me", "alice", "hi", &ts);
+            db.cache_chat_message(&m, "acc-1", "me", "example.com")
+                .unwrap();
+        }
+        let other = room_msg("r1", "bob", "room42", "yo", "2026-05-01T00:00:30Z");
+        db.cache_chat_message(&other, "acc-1", "me", "example.com")
+            .unwrap();
+
+        let history = db.get_cached_chat_history("acc-1", 100).unwrap();
+        assert_eq!(history.len(), 2);
+        // alice DM の最新は dm4
+        let dm = history
+            .iter()
+            .find(|m| m.to_user_id.as_deref() == Some("alice"))
+            .unwrap();
+        assert_eq!(dm.id, "dm4");
+    }
+
+    #[test]
+    fn chat_thread_messages_until_id_pagination() {
+        let (_dir, db) = temp_db();
+        for i in 0..5 {
+            let ts = format!("2026-05-01T00:0{i}:00Z");
+            let m = dm_msg(&format!("m{i}"), "me", "alice", "hi", &ts);
+            db.cache_chat_message(&m, "acc-1", "me", "example.com")
+                .unwrap();
+        }
+        // m3 より過去 (m0..m2) を取得
+        let older = db
+            .get_cached_chat_thread_messages("acc-1", "u:alice", Some("m3"), 10)
+            .unwrap();
+        let ids: Vec<&str> = older.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["m2", "m1", "m0"]);
+    }
+
+    #[test]
+    fn apply_chat_message_reaction_appends() {
+        let (_dir, db) = temp_db();
+        let msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+        let r = reactor("alice", "alice");
+        let applied = db
+            .apply_chat_message_reaction("acc-1", "m1", &r, "👍", true)
+            .unwrap();
+        assert!(applied);
+
+        let stored = db
+            .get_cached_chat_thread_messages("acc-1", "u:alice", None, 10)
+            .unwrap();
+        assert_eq!(stored[0].reactions.len(), 1);
+        assert_eq!(stored[0].reactions[0].reaction, "👍");
+        assert_eq!(stored[0].reactions[0].user.as_ref().unwrap().id, "alice");
+    }
+
+    #[test]
+    fn apply_chat_message_reaction_removes_match() {
+        let (_dir, db) = temp_db();
+        let mut msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        msg.reactions.push(ChatMessageReaction {
+            user: Some(reactor("alice", "alice")),
+            reaction: "👍".to_string(),
+        });
+        msg.reactions.push(ChatMessageReaction {
+            user: Some(reactor("bob", "bob")),
+            reaction: "❤️".to_string(),
+        });
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+
+        let applied = db
+            .apply_chat_message_reaction("acc-1", "m1", &reactor("alice", "alice"), "👍", false)
+            .unwrap();
+        assert!(applied);
+
+        let stored = db
+            .get_cached_chat_thread_messages("acc-1", "u:alice", None, 10)
+            .unwrap();
+        assert_eq!(stored[0].reactions.len(), 1);
+        assert_eq!(stored[0].reactions[0].reaction, "❤️");
+    }
+
+    #[test]
+    fn apply_chat_message_reaction_no_match_returns_false() {
+        let (_dir, db) = temp_db();
+        let msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+        let unmatched = db
+            .apply_chat_message_reaction("acc-1", "m1", &reactor("alice", "alice"), "👍", false)
+            .unwrap();
+        assert!(!unmatched);
+        // 存在しない message
+        let absent = db
+            .apply_chat_message_reaction("acc-1", "missing", &reactor("alice", "alice"), "👍", true)
+            .unwrap();
+        assert!(!absent);
+    }
+
+    #[test]
+    fn delete_cached_chat_message_works() {
+        let (_dir, db) = temp_db();
+        let msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+        assert_eq!(db.chat_cache_count("acc-1").unwrap(), 1);
+
+        let removed = db.delete_cached_chat_message("acc-1", "m1").unwrap();
+        assert!(removed);
+        assert_eq!(db.chat_cache_count("acc-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn cleanup_chat_per_account_independent() {
+        let (_dir, db) = temp_db();
+        for i in 0..5 {
+            let ts = format!("2026-05-01T00:0{i}:00Z");
+            let m = dm_msg(&format!("a{i}"), "me", "alice", "hi", &ts);
+            db.cache_chat_message(&m, "acc-1", "me", "example.com")
+                .unwrap();
+            let m2 = dm_msg(&format!("b{i}"), "me", "bob", "yo", &ts);
+            db.cache_chat_message(&m2, "acc-2", "me", "example.com")
+                .unwrap();
+        }
+
+        // cap=2 で各アカウント独立に 2 件残し
+        let cfg = ChatEvictionConfig {
+            per_account_limit: Some(2),
+            ttl_days: None,
+        };
+        // cached_at が同じ now なので、 ROW_NUMBER は実装依存だが per-account 件数は 2 になることを assert
+        let _ = db.cleanup_chat_with_eviction(&cfg).unwrap();
+        assert_eq!(db.chat_cache_count("acc-1").unwrap(), 2);
+        assert_eq!(db.chat_cache_count("acc-2").unwrap(), 2);
+    }
+
+    #[test]
+    fn delete_account_purges_chat_cache() {
+        let (_dir, db) = temp_db();
+        // 別 account を accounts table に挿入してから chat 行を作る (delete_account は両方触る)
+        db.upsert_account(&Account {
+            id: "acc-1".to_string(),
+            host: "example.com".to_string(),
+            token: String::new(),
+            user_id: "me".to_string(),
+            username: "me".to_string(),
+            display_name: None,
+            avatar_url: None,
+            software: "misskey".to_string(),
+        })
+        .unwrap();
+        let msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+        assert_eq!(db.chat_cache_count("acc-1").unwrap(), 1);
+
+        db.delete_account("acc-1").unwrap();
+        assert_eq!(db.chat_cache_count("acc-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn get_cached_latest_message_id_returns_max_per_thread() {
+        let (_dir, db) = temp_db();
+        for i in 0..3 {
+            let ts = format!("2026-05-01T00:0{i}:00Z");
+            let m = dm_msg(&format!("m{i}"), "me", "alice", "hi", &ts);
+            db.cache_chat_message(&m, "acc-1", "me", "example.com")
+                .unwrap();
+        }
+        let latest = db
+            .get_cached_chat_latest_message_id("acc-1", "u:alice")
+            .unwrap();
+        assert_eq!(latest, Some("m2".to_string()));
+
+        let absent = db
+            .get_cached_chat_latest_message_id("acc-1", "u:nonexistent")
+            .unwrap();
+        assert!(absent.is_none());
+    }
+
+    #[test]
+    fn cache_chat_message_upserts_on_conflict() {
+        let (_dir, db) = temp_db();
+        let mut msg = dm_msg("m1", "me", "alice", "hi", "2026-05-01T00:00:00Z");
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+        // 同 ID で別 text → upsert で上書き
+        msg.text = Some("edited".to_string());
+        db.cache_chat_message(&msg, "acc-1", "me", "example.com")
+            .unwrap();
+        let stored = db
+            .get_cached_chat_thread_messages("acc-1", "u:alice", None, 10)
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text.as_deref(), Some("edited"));
     }
 }
