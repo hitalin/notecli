@@ -61,8 +61,12 @@ pub async fn run_login(
         "write:favorites",
         "read:following",
         "write:following",
-        "read:messaging",
-        "write:messaging",
+        // Misskey v2025 (#15686) の chat/* endpoints (create-to-{user,room},
+        // delete, react, unreact, history, ...) は kind: 'read:chat' / 'write:chat'
+        // を要求する。legacy messaging API は v2025 で完全削除済みなので
+        // `read:messaging` / `write:messaging` は併記しない。
+        "read:chat",
+        "write:chat",
         "read:mutes",
         "write:mutes",
         "read:notes",
