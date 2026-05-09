@@ -54,10 +54,7 @@ impl FrontendEmitter for EventBusEmitter {
 /// Emit to FrontendEmitter only (status events, polling, etc.)
 macro_rules! emit_or_log {
     ($emitter:expr, $event:expr, $payload:expr) => {
-        $emitter.emit(
-            $event,
-            serde_json::to_value(&$payload).unwrap_or_default(),
-        );
+        $emitter.emit($event, serde_json::to_value(&$payload).unwrap_or_default());
     };
 }
 
@@ -72,7 +69,6 @@ macro_rules! emit_event {
         $emitter.emit($emitter_event, data);
     }};
 }
-
 
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -194,10 +190,20 @@ pub struct StreamStatusEvent {
 // --- Internal commands sent to the WebSocket task ---
 
 enum WsCommand {
-    Subscribe { channel: String, id: String, params: Option<Value> },
-    Unsubscribe { id: String },
-    SubNote { id: String },
-    UnsubNote { id: String },
+    Subscribe {
+        channel: String,
+        id: String,
+        params: Option<Value>,
+    },
+    Unsubscribe {
+        id: String,
+    },
+    SubNote {
+        id: String,
+    },
+    UnsubNote {
+        id: String,
+    },
     Shutdown,
 }
 
@@ -298,12 +304,18 @@ impl StreamingManager {
         let event_bus = self.event_bus.clone();
         let db = self.db.clone();
 
+        let api_client = self.api_client.clone();
+        let host_owned = host.to_string();
+        let token_owned = token.to_string();
         let task = tokio::spawn(async move {
             connection_task(
                 emitter,
                 event_bus,
                 db,
+                api_client,
                 account_id_owned,
+                host_owned,
+                token_owned,
                 url_owned,
                 ws_stream,
                 cmd_rx,
@@ -321,10 +333,14 @@ impl StreamingManager {
             },
         );
 
-        emit_or_log!(self.emitter, "stream-status", StreamStatusEvent {
-            account_id: account_id.to_string(),
-            state: "connected".to_string(),
-        });
+        emit_or_log!(
+            self.emitter,
+            "stream-status",
+            StreamStatusEvent {
+                account_id: account_id.to_string(),
+                state: "connected".to_string(),
+            }
+        );
 
         Ok(())
     }
@@ -354,10 +370,14 @@ impl StreamingManager {
         let mut subs = self.subscriptions.write().await;
         subs.retain(|_, info| info.account_id != account_id);
 
-        emit_or_log!(self.emitter, "stream-status", StreamStatusEvent {
-            account_id: account_id.to_string(),
-            state: "disconnected".to_string(),
-        });
+        emit_or_log!(
+            self.emitter,
+            "stream-status",
+            StreamStatusEvent {
+                account_id: account_id.to_string(),
+                state: "disconnected".to_string(),
+            }
+        );
     }
 
     /// Switch between realtime (WebSocket) and polling (HTTP) mode.
@@ -396,10 +416,14 @@ impl StreamingManager {
                 let interval = Duration::from_millis(interval_ms.unwrap_or(15_000));
                 self.start_polling(account_id, host, token, interval).await;
 
-                emit_or_log!(self.emitter, "stream-status", StreamStatusEvent {
-                    account_id: account_id.to_string(),
-                    state: "connected".to_string(),
-                });
+                emit_or_log!(
+                    self.emitter,
+                    "stream-status",
+                    StreamStatusEvent {
+                        account_id: account_id.to_string(),
+                        state: "connected".to_string(),
+                    }
+                );
             }
             _ => {
                 return Err(NoteDeckError::InvalidInput(format!("unknown mode: {mode}")));
@@ -408,13 +432,7 @@ impl StreamingManager {
         Ok(())
     }
 
-    async fn start_polling(
-        &self,
-        account_id: &str,
-        host: &str,
-        token: &str,
-        interval: Duration,
-    ) {
+    async fn start_polling(&self, account_id: &str, host: &str, token: &str, interval: Duration) {
         let mut polls = self.poll_connections.lock().await;
 
         // Stop existing polling task
@@ -474,7 +492,8 @@ impl StreamingManager {
         let params = list_id.as_ref().map(|id| json!({ "listId": id }));
 
         let host = self.get_host(account_id).await?;
-        self.send_subscribe(account_id, &channel, &sub_id, params.clone()).await?;
+        self.send_subscribe(account_id, &channel, &sub_id, params.clone())
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         subs.insert(
@@ -502,7 +521,8 @@ impl StreamingManager {
         let params = Some(json!({ "antennaId": antenna_id }));
 
         let host = self.get_host(account_id).await?;
-        self.send_subscribe(account_id, "antenna", &sub_id, params.clone()).await?;
+        self.send_subscribe(account_id, "antenna", &sub_id, params.clone())
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         subs.insert(
@@ -530,7 +550,8 @@ impl StreamingManager {
         let params = Some(json!({ "channelId": channel_id }));
 
         let host = self.get_host(account_id).await?;
-        self.send_subscribe(account_id, "channel", &sub_id, params.clone()).await?;
+        self.send_subscribe(account_id, "channel", &sub_id, params.clone())
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         subs.insert(
@@ -558,7 +579,8 @@ impl StreamingManager {
         let params = Some(json!({ "roleId": role_id }));
 
         let host = self.get_host(account_id).await?;
-        self.send_subscribe(account_id, "roleTimeline", &sub_id, params.clone()).await?;
+        self.send_subscribe(account_id, "roleTimeline", &sub_id, params.clone())
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         subs.insert(
@@ -586,7 +608,8 @@ impl StreamingManager {
         let params = Some(json!({ "otherId": other_id }));
 
         let host = self.get_host(account_id).await?;
-        self.send_subscribe(account_id, "chatUser", &sub_id, params.clone()).await?;
+        self.send_subscribe(account_id, "chatUser", &sub_id, params.clone())
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         subs.insert(
@@ -614,7 +637,8 @@ impl StreamingManager {
         let params = Some(json!({ "roomId": room_id }));
 
         let host = self.get_host(account_id).await?;
-        self.send_subscribe(account_id, "chatRoom", &sub_id, params.clone()).await?;
+        self.send_subscribe(account_id, "chatRoom", &sub_id, params.clone())
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         subs.insert(
@@ -637,7 +661,8 @@ impl StreamingManager {
         let sub_id = uuid::Uuid::new_v4().to_string();
 
         let host = self.get_host(account_id).await?;
-        self.send_subscribe(account_id, "main", &sub_id, None).await?;
+        self.send_subscribe(account_id, "main", &sub_id, None)
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         subs.insert(
@@ -656,7 +681,11 @@ impl StreamingManager {
         Ok(sub_id)
     }
 
-    pub async fn unsubscribe(&self, account_id: &str, subscription_id: &str) -> Result<(), NoteDeckError> {
+    pub async fn unsubscribe(
+        &self,
+        account_id: &str,
+        subscription_id: &str,
+    ) -> Result<(), NoteDeckError> {
         // Send unsubscribe to WebSocket if in realtime mode
         let conns = self.connections.lock().await;
         if let Some(handle) = conns.get(account_id) {
@@ -687,9 +716,7 @@ impl StreamingManager {
             let mut subs = self.subscriptions.write().await;
             let info = subs
                 .get_mut(subscription_id)
-                .ok_or_else(|| {
-                    NoteDeckError::InvalidInput("subscription not found".to_string())
-                })?;
+                .ok_or_else(|| NoteDeckError::InvalidInput("subscription not found".to_string()))?;
             if info.account_id != account_id {
                 return Err(NoteDeckError::InvalidInput(
                     "subscription account mismatch".to_string(),
@@ -720,9 +747,7 @@ impl StreamingManager {
             let subs = self.subscriptions.read().await;
             let info = subs
                 .get(subscription_id)
-                .ok_or_else(|| {
-                    NoteDeckError::InvalidInput("subscription not found".to_string())
-                })?;
+                .ok_or_else(|| NoteDeckError::InvalidInput("subscription not found".to_string()))?;
             if info.account_id != account_id {
                 return Err(NoteDeckError::InvalidInput(
                     "subscription account mismatch".to_string(),
@@ -734,7 +759,8 @@ impl StreamingManager {
             return Ok(());
         }
 
-        self.send_subscribe(account_id, &channel, subscription_id, params).await?;
+        self.send_subscribe(account_id, &channel, subscription_id, params)
+            .await?;
 
         let mut subs = self.subscriptions.write().await;
         if let Some(info) = subs.get_mut(subscription_id) {
@@ -749,7 +775,9 @@ impl StreamingManager {
         if let Some(handle) = conns.get(account_id) {
             return handle
                 .cmd_tx
-                .send(WsCommand::SubNote { id: note_id.to_string() })
+                .send(WsCommand::SubNote {
+                    id: note_id.to_string(),
+                })
                 .map_err(|_| NoteDeckError::ConnectionClosed);
         }
         drop(conns);
@@ -769,7 +797,9 @@ impl StreamingManager {
         if let Some(handle) = conns.get(account_id) {
             return handle
                 .cmd_tx
-                .send(WsCommand::UnsubNote { id: note_id.to_string() })
+                .send(WsCommand::UnsubNote {
+                    id: note_id.to_string(),
+                })
                 .map_err(|_| NoteDeckError::ConnectionClosed);
         }
         drop(conns);
@@ -831,15 +861,10 @@ impl StreamingManager {
     }
 }
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type WsRead = futures_util::stream::SplitStream<WsStream>;
-type WsWrite = Arc<
-    Mutex<
-        futures_util::stream::SplitSink<WsStream, Message>,
-    >,
->;
+type WsWrite = Arc<Mutex<futures_util::stream::SplitSink<WsStream, Message>>>;
 
 enum WsExitReason {
     Disconnected,
@@ -854,7 +879,10 @@ async fn connection_task(
     emitter: Arc<dyn FrontendEmitter>,
     event_bus: Arc<EventBus>,
     db: Arc<Database>,
+    api_client: Arc<MisskeyClient>,
     account_id: String,
+    host: String,
+    token: String,
     url: String,
     initial_ws: WsStream,
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
@@ -863,17 +891,33 @@ async fn connection_task(
     let mut backoff_secs: u64 = 1;
 
     // Run the first session with the already-connected WebSocket
-    let reason = run_ws_session(&emitter, &event_bus, &db, &account_id, initial_ws, &mut cmd_rx, &subscriptions).await;
+    let reason = run_ws_session(
+        &emitter,
+        &event_bus,
+        &db,
+        &api_client,
+        &account_id,
+        &host,
+        &token,
+        initial_ws,
+        &mut cmd_rx,
+        &subscriptions,
+    )
+    .await;
     if matches!(reason, WsExitReason::Shutdown) {
         return;
     }
 
     // Reconnection loop
     loop {
-        emit_or_log!(emitter, "stream-status", StreamStatusEvent {
-            account_id: account_id.clone(),
-            state: "reconnecting".to_string(),
-        });
+        emit_or_log!(
+            emitter,
+            "stream-status",
+            StreamStatusEvent {
+                account_id: account_id.clone(),
+                state: "reconnecting".to_string(),
+            }
+        );
 
         // Wait with backoff, but listen for Shutdown during the wait
         let sleep = tokio::time::sleep(Duration::from_secs(backoff_secs));
@@ -908,16 +952,23 @@ async fn connection_task(
             Ok(Ok((ws_stream, _))) => {
                 backoff_secs = 1; // Reset backoff on success
 
-                emit_or_log!(emitter, "stream-status", StreamStatusEvent {
-                    account_id: account_id.clone(),
-                    state: "connected".to_string(),
-                });
+                emit_or_log!(
+                    emitter,
+                    "stream-status",
+                    StreamStatusEvent {
+                        account_id: account_id.clone(),
+                        state: "connected".to_string(),
+                    }
+                );
 
                 let reason = run_ws_session(
                     &emitter,
                     &event_bus,
                     &db,
+                    &api_client,
                     &account_id,
+                    &host,
+                    &token,
                     ws_stream,
                     &mut cmd_rx,
                     &subscriptions,
@@ -941,11 +992,15 @@ async fn connection_task(
 }
 
 /// Run a single WebSocket session. Re-subscribes existing channels, then enters the message loop.
+#[allow(clippy::too_many_arguments)]
 async fn run_ws_session(
     emitter: &Arc<dyn FrontendEmitter>,
     event_bus: &Arc<EventBus>,
     db: &Arc<Database>,
+    api_client: &Arc<MisskeyClient>,
     account_id: &str,
+    host: &str,
+    token: &str,
     ws_stream: WsStream,
     cmd_rx: &mut mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
@@ -977,7 +1032,20 @@ async fn run_ws_session(
         }
     }
 
-    ws_loop(emitter, event_bus, db, account_id, read, write, cmd_rx, subscriptions).await
+    ws_loop(
+        emitter,
+        event_bus,
+        db,
+        api_client,
+        account_id,
+        host,
+        token,
+        read,
+        write,
+        cmd_rx,
+        subscriptions,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -985,7 +1053,10 @@ async fn ws_loop(
     emitter: &Arc<dyn FrontendEmitter>,
     event_bus: &Arc<EventBus>,
     db: &Arc<Database>,
+    api_client: &Arc<MisskeyClient>,
     account_id: &str,
+    host: &str,
+    token: &str,
     mut read: WsRead,
     write: WsWrite,
     cmd_rx: &mut mpsc::UnboundedReceiver<WsCommand>,
@@ -999,13 +1070,16 @@ async fn ws_loop(
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        let emitter = emitter.clone();
-                        let event_bus = event_bus.clone();
-                        let db = db.clone();
-                        let account_id = account_id.to_string();
-                        let subscriptions = subscriptions.clone();
+                        let emitter_c = emitter.clone();
+                        let event_bus_c = event_bus.clone();
+                        let db_c = db.clone();
+                        let api_client_c = api_client.clone();
+                        let account_id_c = account_id.to_string();
+                        let host_c = host.to_string();
+                        let token_c = token.to_string();
+                        let subscriptions_c = subscriptions.clone();
                         tokio::spawn(async move {
-                            handle_ws_message(&*emitter, &event_bus, &db, &account_id, &text, &subscriptions).await;
+                            handle_ws_message(&*emitter_c, &event_bus_c, &db_c, &api_client_c, &account_id_c, &host_c, &token_c, &text, &subscriptions_c).await;
                         });
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -1076,11 +1150,15 @@ async fn ws_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ws_message(
     emitter: &dyn FrontendEmitter,
     event_bus: &EventBus,
     db: &Arc<Database>,
+    api_client: &Arc<MisskeyClient>,
     account_id: &str,
+    account_host: &str,
+    account_token: &str,
     text: &str,
     subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
 ) {
@@ -1097,8 +1175,16 @@ async fn handle_ws_message(
     // Note Capture: { "type": "noteUpdated", "body": { "id": "...", "type": "...", "body": ... } }
     if msg_type == "noteUpdated" {
         if let Some(mut body) = msg.get_mut("body").map(Value::take) {
-            let note_id = body.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
-            let update_type = body.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            let note_id = body
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let update_type = body
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
             let update_body = body.get_mut("body").map(Value::take).unwrap_or_default();
             let payload = StreamNoteCaptureEvent {
                 account_id: account_id.to_string(),
@@ -1106,7 +1192,13 @@ async fn handle_ws_message(
                 update_type,
                 body: update_body,
             };
-            emit_event!(emitter, event_bus, "note-capture-updated", "stream-note-capture-updated", payload);
+            emit_event!(
+                emitter,
+                event_bus,
+                "note-capture-updated",
+                "stream-note-capture-updated",
+                payload
+            );
         }
         return;
     }
@@ -1164,10 +1256,21 @@ async fn handle_ws_message(
             emit_event!(emitter, event_bus, "note", "stream-note", payload);
         }
     } else if is_note_channel && event_type == "noteUpdated" {
-        let note_id = event_body.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
-        let update_type = event_body.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let note_id = event_body
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let update_type = event_body
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
         let mut event_body = event_body;
-        let update_body = event_body.get_mut("body").map(Value::take).unwrap_or_default();
+        let update_body = event_body
+            .get_mut("body")
+            .map(Value::take)
+            .unwrap_or_default();
         let payload = StreamNoteUpdatedEvent {
             account_id: account_id.to_string(),
             subscription_id: sub_id,
@@ -1175,7 +1278,13 @@ async fn handle_ws_message(
             update_type,
             body: update_body,
         };
-        emit_event!(emitter, event_bus, "note-updated", "stream-note-updated", payload);
+        emit_event!(
+            emitter,
+            event_bus,
+            "note-updated",
+            "stream-note-updated",
+            payload
+        );
     } else if kind == "main" {
         if event_type == "notification" {
             if let Ok(raw) = serde_json::from_value::<RawNotification>(event_body) {
@@ -1185,7 +1294,13 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     notification,
                 };
-                emit_event!(emitter, event_bus, "notification", "stream-notification", payload);
+                emit_event!(
+                    emitter,
+                    event_bus,
+                    "notification",
+                    "stream-notification",
+                    payload
+                );
             }
         } else if event_type == "mention" || event_type == "reply" {
             // Serialize event_body as main-event first, then try parsing as mention
@@ -1194,7 +1309,8 @@ async fn handle_ws_message(
                 subscription_id: sub_id.clone(),
                 event_type,
                 body: event_body.clone(),
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
             emitter.emit("stream-main-event", main_data);
 
             if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
@@ -1214,11 +1330,26 @@ async fn handle_ws_message(
                 event_type,
                 body: event_body,
             };
-            emit_event!(emitter, event_bus, main_event_type, "stream-main-event", payload);
+            emit_event!(
+                emitter,
+                event_bus,
+                main_event_type,
+                "stream-main-event",
+                payload
+            );
         }
     } else if kind == "chat" {
         if event_type == "message" {
-            if let Ok(msg) = serde_json::from_value::<ChatMessage>(event_body) {
+            if let Ok(mut msg) = serde_json::from_value::<ChatMessage>(event_body) {
+                // Misskey 本家の chat:message WS event は Lite packer 固定で
+                // fromUser/toUser を含まない (#460) ため hydrate する。
+                api_client
+                    .hydrate_chat_message_users(
+                        account_host,
+                        account_token,
+                        std::slice::from_mut(&mut msg),
+                    )
+                    .await;
                 // DB upsert (fire-and-forget)。`account_user_id` は DM partner 計算に必要。
                 if let Ok(Some(account)) = db.get_account(account_id) {
                     let db = db.clone();
@@ -1379,18 +1510,16 @@ async fn polling_loop(
         let mut poll_failed = false;
 
         for (sub_id, info) in &subs_snapshot {
-            let state = sub_states.entry(sub_id.clone()).or_insert(PollSubState {
-                since_id: None,
-            });
+            let state = sub_states
+                .entry(sub_id.clone())
+                .or_insert(PollSubState { since_id: None });
 
             let tl_type = TimelineType::new(&info.timeline_type);
-            let mut options = TimelineOptions::new(
-                30,
-                state.since_id.clone(),
-                None,
-            );
+            let mut options = TimelineOptions::new(30, state.since_id.clone(), None);
             options.list_id = info.params.as_ref().and_then(|p| {
-                p.get("listId").and_then(|v| v.as_str()).map(|s| s.to_string())
+                p.get("listId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
             });
 
             match api_client
@@ -1442,7 +1571,7 @@ async fn polling_loop(
 
         // Note capture: poll every 2nd cycle (2x interval)
         poll_count += 1;
-        if poll_count % 2 == 0 {
+        if poll_count.is_multiple_of(2) {
             let note_ids: Vec<String> = {
                 let captured = captured_notes.read().await;
                 captured
@@ -1462,9 +1591,7 @@ async fn polling_loop(
                         let account_id = account_id.clone();
                         let note_id = note_id.clone();
                         async move {
-                            let result = api
-                                .get_note(&host, &token, &account_id, &note_id)
-                                .await;
+                            let result = api.get_note(&host, &token, &account_id, &note_id).await;
                             (note_id, result)
                         }
                     })
@@ -1496,16 +1623,12 @@ async fn polling_loop(
                                         "userId": null,
                                     }),
                                 };
-                                emit_or_log!(
-                                    emitter,
-                                    "stream-note-capture-updated",
-                                    payload
-                                );
+                                emit_or_log!(emitter, "stream-note-capture-updated", payload);
                             }
                         }
 
                         // Find removed reactions
-                        for (reaction, _) in &old_reactions {
+                        for reaction in old_reactions.keys() {
                             if !new_reactions.contains_key(reaction) {
                                 let payload = StreamNoteCaptureEvent {
                                     account_id: account_id.clone(),
@@ -1516,11 +1639,7 @@ async fn polling_loop(
                                         "userId": null,
                                     }),
                                 };
-                                emit_or_log!(
-                                    emitter,
-                                    "stream-note-capture-updated",
-                                    payload
-                                );
+                                emit_or_log!(emitter, "stream-note-capture-updated", payload);
                             }
                         }
 
@@ -1539,10 +1658,14 @@ async fn polling_loop(
                 (1u64 << consecutive_failures.min(5)).min(MAX_POLL_BACKOFF_SECS)
             };
 
-            emit_or_log!(emitter, "stream-status", StreamStatusEvent {
-                account_id: account_id.clone(),
-                state: "reconnecting".to_string(),
-            });
+            emit_or_log!(
+                emitter,
+                "stream-status",
+                StreamStatusEvent {
+                    account_id: account_id.clone(),
+                    state: "reconnecting".to_string(),
+                }
+            );
 
             Duration::from_secs(backoff)
         } else {

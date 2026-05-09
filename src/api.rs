@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -8,13 +8,12 @@ use serde_json::{json, Value};
 
 use crate::error::NoteDeckError;
 use crate::models::{
-    AuthResult, ChatMessage, CreateNoteParams, NormalizedDriveFile, NormalizedNote,
-    NormalizedNoteReaction, NormalizedNotification, NormalizedUser, NormalizedUserDetail,
-    RawCreateNoteResponse, RawDriveFile, RawEmojisResponse, RawMiAuthResponse, RawNote,
-    RawNoteReaction, RawNotification, Antenna, Channel, Clip, RawUser, RawUserDetail,
+    Antenna, AuthResult, Channel, ChatMessage, ChatUser, Clip, CreateNoteParams,
+    NormalizedDriveFile, NormalizedNote, NormalizedNoteReaction, NormalizedNotification,
+    NormalizedUser, NormalizedUserDetail, RawCreateNoteResponse, RawDriveFile, RawEmojisResponse,
+    RawMiAuthResponse, RawNote, RawNoteReaction, RawNotification, RawUser, RawUserDetail,
     SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
 };
-
 
 /// Maximum response body size (50 MB) to prevent memory exhaustion from malicious servers.
 const MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
@@ -94,7 +93,8 @@ impl MisskeyClient {
                 });
             }
         }
-        let mut buf = Vec::with_capacity(content_len.unwrap_or(4096).min(MAX_RESPONSE_BYTES as u64) as usize);
+        let mut buf =
+            Vec::with_capacity(content_len.unwrap_or(4096).min(MAX_RESPONSE_BYTES as u64) as usize);
         let mut stream = res.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(NoteDeckError::from)?;
@@ -181,7 +181,11 @@ impl MisskeyClient {
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let endpoint = timeline_type.api_endpoint();
         let mut params = json!({ "limit": options.limit() });
-        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        apply_pagination(
+            &mut params,
+            options.since_id.as_deref(),
+            options.until_id.as_deref(),
+        );
         if let Some(ref f) = options.filters {
             if let Some(v) = f.with_renotes {
                 params["withRenotes"] = json!(v);
@@ -219,7 +223,9 @@ impl MisskeyClient {
         host: &str,
         token: &str,
     ) -> Result<Vec<UserList>, NoteDeckError> {
-        let data = self.request(host, token, "users/lists/list", json!({})).await?;
+        let data = self
+            .request(host, token, "users/lists/list", json!({}))
+            .await?;
         let lists: Vec<UserList> = serde_json::from_value(data)?;
         Ok(lists)
     }
@@ -229,7 +235,9 @@ impl MisskeyClient {
         host: &str,
         token: &str,
     ) -> Result<Vec<Antenna>, NoteDeckError> {
-        let data = self.request(host, token, "antennas/list", json!({})).await?;
+        let data = self
+            .request(host, token, "antennas/list", json!({}))
+            .await?;
         let antennas: Vec<Antenna> = serde_json::from_value(data)?;
         Ok(antennas)
     }
@@ -290,9 +298,7 @@ impl MisskeyClient {
         limit: i64,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let params = json!({ "limit": limit });
-        let data = self
-            .request(host, token, "notes/featured", params)
-            .await?;
+        let data = self.request(host, token, "notes/featured", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw
             .into_iter()
@@ -300,11 +306,7 @@ impl MisskeyClient {
             .collect())
     }
 
-    pub async fn get_clips(
-        &self,
-        host: &str,
-        token: &str,
-    ) -> Result<Vec<Clip>, NoteDeckError> {
+    pub async fn get_clips(&self, host: &str, token: &str) -> Result<Vec<Clip>, NoteDeckError> {
         let data = self.request(host, token, "clips/list", json!({})).await?;
         let clips: Vec<Clip> = serde_json::from_value(data)?;
         Ok(clips)
@@ -339,7 +341,12 @@ impl MisskeyClient {
         host: &str,
         token: &str,
     ) -> Result<Vec<Channel>, NoteDeckError> {
-        let search_fut = self.request(host, token, "channels/search", json!({"query": "", "limit": 100}));
+        let search_fut = self.request(
+            host,
+            token,
+            "channels/search",
+            json!({"query": "", "limit": 100}),
+        );
         let featured_fut = self.request(host, token, "channels/featured", json!({}));
 
         let (followed, favorites, owned, featured, search) = if token.is_empty() {
@@ -360,7 +367,11 @@ impl MisskeyClient {
         let mut channels = Vec::with_capacity(128);
 
         // User's own channels first, then public channels
-        for data in [followed, favorites, owned, featured, search].into_iter().flatten().flatten() {
+        for data in [followed, favorites, owned, featured, search]
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             if let Ok(list) = serde_json::from_value::<Vec<Channel>>(data) {
                 for ch in list {
                     if seen.insert(ch.id.clone()) {
@@ -500,8 +511,7 @@ impl MisskeyClient {
         }
 
         let data = self.request(host, token, "notes/create", body).await?;
-        let raw: RawCreateNoteResponse =
-            serde_json::from_value(data)?;
+        let raw: RawCreateNoteResponse = serde_json::from_value(data)?;
         Ok(raw.created_note.normalize(account_id, host))
     }
 
@@ -597,6 +607,7 @@ impl MisskeyClient {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upload_file(
         &self,
         host: &str,
@@ -682,13 +693,8 @@ impl MisskeyClient {
         token: &str,
         note_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(
-            host,
-            token,
-            "notes/delete",
-            json!({ "noteId": note_id }),
-        )
-        .await?;
+        self.request(host, token, "notes/delete", json!({ "noteId": note_id }))
+            .await?;
         Ok(())
     }
 
@@ -758,7 +764,12 @@ impl MisskeyClient {
         let palettes = palettes_val.as_array()?;
         let first = palettes.first()?;
         let emojis = first.get("emojis")?.as_array()?;
-        Some(emojis.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        Some(
+            emojis
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+        )
     }
 
     pub async fn get_user_notes(
@@ -770,7 +781,11 @@ impl MisskeyClient {
         options: TimelineOptions,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let mut params = json!({ "userId": user_id, "limit": options.limit() });
-        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        apply_pagination(
+            &mut params,
+            options.since_id.as_deref(),
+            options.until_id.as_deref(),
+        );
         let data = self.request(host, token, "users/notes", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw
@@ -788,7 +803,11 @@ impl MisskeyClient {
         options: SearchOptions,
     ) -> Result<Vec<NormalizedNote>, NoteDeckError> {
         let mut params = json!({ "query": query, "limit": options.limit() });
-        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        apply_pagination(
+            &mut params,
+            options.since_id.as_deref(),
+            options.until_id.as_deref(),
+        );
         if let Some(d) = options.since_date {
             params["sinceDate"] = json!(d);
         }
@@ -811,12 +830,13 @@ impl MisskeyClient {
         options: TimelineOptions,
     ) -> Result<Vec<NormalizedNotification>, NoteDeckError> {
         let mut params = json!({ "limit": options.limit() });
-        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
-        let data = self
-            .request(host, token, "i/notifications", params)
-            .await?;
-        let raw: Vec<RawNotification> =
-            serde_json::from_value(data)?;
+        apply_pagination(
+            &mut params,
+            options.since_id.as_deref(),
+            options.until_id.as_deref(),
+        );
+        let data = self.request(host, token, "i/notifications", params).await?;
+        let raw: Vec<RawNotification> = serde_json::from_value(data)?;
         Ok(raw
             .into_iter()
             .map(|n| n.normalize(account_id, host))
@@ -831,7 +851,11 @@ impl MisskeyClient {
         options: TimelineOptions,
     ) -> Result<Vec<NormalizedNotification>, NoteDeckError> {
         let mut params = json!({ "limit": options.limit() });
-        apply_pagination(&mut params, options.since_id.as_deref(), options.until_id.as_deref());
+        apply_pagination(
+            &mut params,
+            options.since_id.as_deref(),
+            options.until_id.as_deref(),
+        );
         let data = self
             .request(host, token, "i/notifications-grouped", params)
             .await?;
@@ -1068,8 +1092,13 @@ impl MisskeyClient {
         token: &str,
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "following/create", json!({ "userId": user_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "following/create",
+            json!({ "userId": user_id }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1079,8 +1108,13 @@ impl MisskeyClient {
         token: &str,
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "following/delete", json!({ "userId": user_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "following/delete",
+            json!({ "userId": user_id }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1090,8 +1124,13 @@ impl MisskeyClient {
         token: &str,
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "following/invalidate", json!({ "userId": user_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "following/invalidate",
+            json!({ "userId": user_id }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1101,8 +1140,13 @@ impl MisskeyClient {
         token: &str,
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "following/requests/accept", json!({ "userId": user_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "following/requests/accept",
+            json!({ "userId": user_id }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1112,17 +1156,18 @@ impl MisskeyClient {
         token: &str,
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "following/requests/reject", json!({ "userId": user_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "following/requests/reject",
+            json!({ "userId": user_id }),
+        )
+        .await?;
         Ok(())
     }
 
     /// Fetch server meta information.
-    pub async fn get_meta(
-        &self,
-        host: &str,
-        token: &str,
-    ) -> Result<Value, NoteDeckError> {
+    pub async fn get_meta(&self, host: &str, token: &str) -> Result<Value, NoteDeckError> {
         self.request(host, token, "meta", json!({})).await
     }
 
@@ -1266,11 +1311,7 @@ impl MisskeyClient {
 
     // --- Unread chat ---
 
-    pub async fn get_unread_chat(
-        &self,
-        host: &str,
-        token: &str,
-    ) -> Result<bool, NoteDeckError> {
+    pub async fn get_unread_chat(&self, host: &str, token: &str) -> Result<bool, NoteDeckError> {
         let data = self
             .request(host, token, "messaging/unread", json!({}))
             .await?;
@@ -1279,11 +1320,7 @@ impl MisskeyClient {
 
     // --- Self (current user) ---
 
-    pub async fn get_self(
-        &self,
-        host: &str,
-        token: &str,
-    ) -> Result<Value, NoteDeckError> {
+    pub async fn get_self(&self, host: &str, token: &str) -> Result<Value, NoteDeckError> {
         self.request(host, token, "i", json!({})).await
     }
 
@@ -1327,8 +1364,13 @@ impl MisskeyClient {
         token: &str,
         file_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "drive/files/delete", json!({ "fileId": file_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "drive/files/delete",
+            json!({ "fileId": file_id }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1340,8 +1382,13 @@ impl MisskeyClient {
         token: &str,
         limit: i64,
     ) -> Result<Value, NoteDeckError> {
-        self.request(host, token, "following/requests/list", json!({ "limit": limit }))
-            .await
+        self.request(
+            host,
+            token,
+            "following/requests/list",
+            json!({ "limit": limit }),
+        )
+        .await
     }
 
     // --- Explore (users/roles) ---
@@ -1371,11 +1418,7 @@ impl MisskeyClient {
         self.request(host, token, "users", params).await
     }
 
-    pub async fn get_roles(
-        &self,
-        host: &str,
-        token: &str,
-    ) -> Result<Value, NoteDeckError> {
+    pub async fn get_roles(&self, host: &str, token: &str) -> Result<Value, NoteDeckError> {
         self.request(host, token, "roles/list", json!({})).await
     }
 
@@ -1539,19 +1582,11 @@ impl MisskeyClient {
 
     // --- Server stats ---
 
-    pub async fn get_server_stats(
-        &self,
-        host: &str,
-        token: &str,
-    ) -> Result<Value, NoteDeckError> {
+    pub async fn get_server_stats(&self, host: &str, token: &str) -> Result<Value, NoteDeckError> {
         self.request(host, token, "stats", json!({})).await
     }
 
-    pub async fn get_meta_detail(
-        &self,
-        host: &str,
-        token: &str,
-    ) -> Result<Value, NoteDeckError> {
+    pub async fn get_meta_detail(&self, host: &str, token: &str) -> Result<Value, NoteDeckError> {
         self.request(host, token, "meta", json!({ "detail": true }))
             .await
     }
@@ -1747,9 +1782,7 @@ impl MisskeyClient {
         if room {
             params["room"] = json!(true);
         }
-        let data = self
-            .request(host, token, "chat/history", params)
-            .await?;
+        let data = self.request(host, token, "chat/history", params).await?;
         let messages: Vec<ChatMessage> = serde_json::from_value(data)?;
         Ok(messages)
     }
@@ -1771,7 +1804,9 @@ impl MisskeyClient {
         let data = self
             .request(host, token, "chat/messages/user-timeline", params)
             .await?;
-        let messages: Vec<ChatMessage> = serde_json::from_value(data)?;
+        let mut messages: Vec<ChatMessage> = serde_json::from_value(data)?;
+        self.hydrate_chat_message_users(host, token, &mut messages)
+            .await;
         Ok(messages)
     }
 
@@ -1792,8 +1827,81 @@ impl MisskeyClient {
         let data = self
             .request(host, token, "chat/messages/room-timeline", params)
             .await?;
-        let messages: Vec<ChatMessage> = serde_json::from_value(data)?;
+        let mut messages: Vec<ChatMessage> = serde_json::from_value(data)?;
+        self.hydrate_chat_message_users(host, token, &mut messages)
+            .await;
         Ok(messages)
+    }
+
+    /// `users/show?userIds=[...]` の bulk 取得。
+    /// Misskey は `userIds` 配列で 1 回の API 呼び出しで複数ユーザーを返す。
+    /// 空配列なら API を叩かず即 `Ok(vec![])` で return。
+    pub async fn get_users_bulk(
+        &self,
+        host: &str,
+        token: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<ChatUser>, NoteDeckError> {
+        if user_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let data = self
+            .request(host, token, "users/show", json!({ "userIds": user_ids }))
+            .await?;
+        let users: Vec<ChatUser> = serde_json::from_value(data)?;
+        Ok(users)
+    }
+
+    /// `chat/messages/{user|room}-timeline` と WS chat:message が
+    /// Misskey 本家の Lite packer 固定で `fromUser`/`toUser` を含まない
+    /// (#460) のを補完する。null になっている `from_user` / `to_user` を
+    /// `users/show?userIds=[...]` で 1 リクエストにまとめて hydrate する。
+    /// 失敗しても null のまま継続する best-effort 動作。
+    pub(crate) async fn hydrate_chat_message_users(
+        &self,
+        host: &str,
+        token: &str,
+        messages: &mut [ChatMessage],
+    ) {
+        let mut needed: HashSet<String> = HashSet::new();
+        for m in messages.iter() {
+            if m.from_user.is_none() {
+                needed.insert(m.from_user_id.clone());
+            }
+            if let Some(uid) = &m.to_user_id {
+                if m.to_user.is_none() {
+                    needed.insert(uid.clone());
+                }
+            }
+        }
+        if needed.is_empty() {
+            return;
+        }
+        let user_ids: Vec<String> = needed.into_iter().collect();
+        let users = match self.get_users_bulk(host, token, &user_ids).await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to hydrate chat users");
+                return;
+            }
+        };
+        let user_map: HashMap<String, ChatUser> =
+            users.into_iter().map(|u| (u.id.clone(), u)).collect();
+        for m in messages.iter_mut() {
+            if m.from_user.is_none() {
+                if let Some(u) = user_map.get(&m.from_user_id) {
+                    m.from_user = Some(u.clone());
+                }
+            }
+            let to_uid = m.to_user_id.clone();
+            if let Some(uid) = to_uid {
+                if m.to_user.is_none() {
+                    if let Some(u) = user_map.get(&uid) {
+                        m.to_user = Some(u.clone());
+                    }
+                }
+            }
+        }
     }
 
     pub async fn create_chat_message_to_user(
@@ -1992,8 +2100,13 @@ impl MisskeyClient {
         token: &str,
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "renote-mute/create", json!({ "userId": user_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "renote-mute/create",
+            json!({ "userId": user_id }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -2003,8 +2116,13 @@ impl MisskeyClient {
         token: &str,
         user_id: &str,
     ) -> Result<(), NoteDeckError> {
-        self.request(host, token, "renote-mute/delete", json!({ "userId": user_id }))
-            .await?;
+        self.request(
+            host,
+            token,
+            "renote-mute/delete",
+            json!({ "userId": user_id }),
+        )
+        .await?;
         Ok(())
     }
 
@@ -2183,7 +2301,6 @@ impl MisskeyClient {
         let meta: Value = serde_json::from_str(&text)?;
         Ok(meta)
     }
-
 }
 
 #[cfg(test)]
@@ -2252,10 +2369,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/notes/show"))
-            .respond_with(
-                ResponseTemplate::new(404)
-                    .set_body_json(json!({"error": {"message": "No such note", "code": "NO_SUCH_NOTE"}})),
-            )
+            .respond_with(ResponseTemplate::new(404).set_body_json(
+                json!({"error": {"message": "No such note", "code": "NO_SUCH_NOTE"}}),
+            ))
             .mount(&server)
             .await;
 
@@ -2309,13 +2425,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/notes/timeline"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!([
-                        raw_note_json("n1", "Hello"),
-                        raw_note_json("n2", "World"),
-                    ])),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                raw_note_json("n1", "Hello"),
+                raw_note_json("n2", "World"),
+            ])))
             .mount(&server)
             .await;
 
@@ -2595,8 +2708,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/notes/children"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!([raw_note_json("r1", "reply")])),
+                ResponseTemplate::new(200).set_body_json(json!([raw_note_json("r1", "reply")])),
             )
             .mount(&server)
             .await;
@@ -2620,7 +2732,11 @@ mod tests {
             .await;
 
         let client = MisskeyClient::with_base_url(&server.uri());
-        let scope = vec!["client".to_string(), "preferences".to_string(), "sync".to_string()];
+        let scope = vec![
+            "client".to_string(),
+            "preferences".to_string(),
+            "sync".to_string(),
+        ];
         let result = client
             .get_registry_value("h", "token", &scope, "theme:dark")
             .await
@@ -2661,7 +2777,11 @@ mod tests {
             .await;
 
         let client = MisskeyClient::with_base_url(&server.uri());
-        let scope = vec!["client".to_string(), "preferences".to_string(), "sync".to_string()];
+        let scope = vec![
+            "client".to_string(),
+            "preferences".to_string(),
+            "sync".to_string(),
+        ];
         client
             .set_registry_value("h", "token", &scope, "theme:dark", json!("my-theme"))
             .await
@@ -2694,19 +2814,194 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/i/registry/keys-with-type"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({"theme:dark": "string", "plugins": "array"}),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"theme:dark": "string", "plugins": "array"})),
+            )
             .mount(&server)
             .await;
 
         let client = MisskeyClient::with_base_url(&server.uri());
-        let scope = vec!["client".to_string(), "preferences".to_string(), "sync".to_string()];
+        let scope = vec![
+            "client".to_string(),
+            "preferences".to_string(),
+            "sync".to_string(),
+        ];
         let result = client
             .list_registry_keys("h", "token", &scope)
             .await
             .unwrap();
         assert_eq!(result.get("theme:dark").map(String::as_str), Some("string"));
         assert_eq!(result.get("plugins").map(String::as_str), Some("array"));
+    }
+
+    // --- Chat user hydration (#460) ---
+
+    fn null_user_chat_message_json(id: &str, from: &str, to: &str) -> Value {
+        json!({
+            "id": id,
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "fromUserId": from,
+            "fromUser": null,
+            "toUserId": to,
+            "toUser": null,
+            "toRoomId": null,
+            "toRoom": null,
+            "text": "hi",
+            "fileId": null,
+            "file": null,
+            "isRead": false,
+            "reactions": []
+        })
+    }
+
+    fn user_show_response_for(ids: &[(&str, &str)]) -> Value {
+        let arr: Vec<Value> = ids
+            .iter()
+            .map(|(id, name)| {
+                json!({
+                    "id": id,
+                    "username": name,
+                    "name": name,
+                    "host": null,
+                    "avatarUrl": format!("https://example.com/{name}.png"),
+                    "emojis": {}
+                })
+            })
+            .collect();
+        Value::Array(arr)
+    }
+
+    #[tokio::test]
+    async fn get_users_bulk_returns_users() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(user_show_response_for(&[("u1", "alice"), ("u2", "bob")])),
+            )
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let users = client
+            .get_users_bulk("h", "token", &["u1".to_string(), "u2".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[1].username, "bob");
+    }
+
+    #[tokio::test]
+    async fn get_users_bulk_empty_input_returns_empty_without_request() {
+        let client = MisskeyClient::with_base_url("http://127.0.0.1:1");
+        let users = client.get_users_bulk("h", "token", &[]).await.unwrap();
+        assert!(users.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_chat_user_messages_hydrates_null_users() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/messages/user-timeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                null_user_chat_message_json("m1", "u_other", "u_self"),
+                null_user_chat_message_json("m2", "u_self", "u_other"),
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(user_show_response_for(&[
+                    ("u_self", "me"),
+                    ("u_other", "they"),
+                ])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let msgs = client
+            .get_chat_user_messages("h", "token", "u_other", 30, None, None)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].from_user.as_ref().unwrap().username, "they");
+        assert_eq!(msgs[0].to_user.as_ref().unwrap().username, "me");
+        assert_eq!(msgs[1].from_user.as_ref().unwrap().username, "me");
+        assert_eq!(msgs[1].to_user.as_ref().unwrap().username, "they");
+    }
+
+    #[tokio::test]
+    async fn hydrate_keeps_existing_user_and_skips_show() {
+        let server = MockServer::start().await;
+        // user-show は呼ばれないはず (既に fromUser/toUser non-null)
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/messages/room-timeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": "m1",
+                "createdAt": "2025-01-01T00:00:00.000Z",
+                "fromUserId": "u1",
+                "fromUser": {
+                    "id": "u1", "username": "alice", "name": "Alice",
+                    "host": null, "avatarUrl": null, "emojis": {}
+                },
+                "toUserId": null,
+                "toUser": null,
+                "toRoomId": "r1",
+                "toRoom": {"id": "r1", "name": "Room", "description": null},
+                "text": "hi",
+                "fileId": null,
+                "file": null,
+                "isRead": null,
+                "reactions": []
+            }])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let msgs = client
+            .get_chat_room_messages("h", "token", "r1", 30, None, None)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].from_user.as_ref().unwrap().username, "alice");
+    }
+
+    #[tokio::test]
+    async fn hydrate_swallows_users_show_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/messages/user-timeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                null_user_chat_message_json("m1", "u_other", "u_self"),
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let msgs = client
+            .get_chat_user_messages("h", "token", "u_other", 30, None, None)
+            .await
+            .unwrap();
+        // 失敗時は null のまま。panic せず messages は返る。
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].from_user.is_none());
+        assert!(msgs[0].to_user.is_none());
     }
 }
