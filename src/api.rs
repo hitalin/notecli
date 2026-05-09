@@ -1311,11 +1311,39 @@ impl MisskeyClient {
 
     // --- Unread chat ---
 
-    pub async fn get_unread_chat(&self, host: &str, token: &str) -> Result<bool, NoteDeckError> {
-        let data = self
-            .request(host, token, "messaging/unread", json!({}))
-            .await?;
-        Ok(data.as_bool().unwrap_or(false))
+    /// 未読チャットがあるかを返す。
+    ///
+    /// Misskey 新 Chat API ([#15686](https://github.com/misskey-dev/misskey/pull/15686), v2025) では
+    /// legacy `messaging/unread` エンドポイントが廃止されたため、`chat/history` を
+    /// `room=false` (DM) と `room=true` (room) で叩いて各 thread 最新メッセージの
+    /// `isRead` フラグを集計する。`me_user_id` は自分送信メッセージを除外するために必要
+    /// (自分送信メッセージで `isRead=false` でも自分の未読扱いにしないため)。
+    pub async fn get_unread_chat(
+        &self,
+        host: &str,
+        token: &str,
+        me_user_id: &str,
+    ) -> Result<bool, NoteDeckError> {
+        for room in [false, true] {
+            let mut params = json!({ "limit": 100 });
+            if room {
+                params["room"] = json!(true);
+            }
+            // 片方失敗しても他方を確認できるよう、エラーは握りつぶして次に進む
+            let data = match self.request(host, token, "chat/history", params).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let Some(arr) = data.as_array() else { continue };
+            for msg in arr {
+                let from = msg.get("fromUserId").and_then(|v| v.as_str()).unwrap_or("");
+                let is_read = msg.get("isRead").and_then(|v| v.as_bool()).unwrap_or(true);
+                if from != me_user_id && !is_read {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     // --- Self (current user) ---
@@ -3003,5 +3031,114 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].from_user.is_none());
         assert!(msgs[0].to_user.is_none());
+    }
+
+    // --- Unread chat (#469: messaging/unread → chat/history isRead 集計) ---
+
+    fn unread_chat_history_msg(
+        id: &str,
+        from_user_id: &str,
+        is_read: bool,
+        is_room: bool,
+    ) -> Value {
+        let mut m = json!({
+            "id": id,
+            "createdAt": "2025-01-01T00:00:00.000Z",
+            "fromUserId": from_user_id,
+            "fromUser": null,
+            "toUserId": null,
+            "toUser": null,
+            "toRoomId": null,
+            "toRoom": null,
+            "text": "hi",
+            "fileId": null,
+            "file": null,
+            "isRead": is_read,
+            "reactions": []
+        });
+        if is_room {
+            m["toRoomId"] = json!("r1");
+            m["toRoom"] = json!({"id": "r1", "name": "R", "description": null});
+        } else {
+            m["toUserId"] = json!("u_self");
+        }
+        m
+    }
+
+    #[tokio::test]
+    async fn get_unread_chat_returns_true_when_other_user_message_is_unread() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                unread_chat_history_msg("m1", "u_other", false, false),
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let unread = client
+            .get_unread_chat("h", "token", "u_self")
+            .await
+            .unwrap();
+        assert!(unread);
+    }
+
+    #[tokio::test]
+    async fn get_unread_chat_excludes_self_messages() {
+        let server = MockServer::start().await;
+        // 自分送信の DM が isRead=false (= 相手未読) でも自分の未読扱いにしない
+        Mock::given(method("POST"))
+            .and(path("/api/chat/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                unread_chat_history_msg("m1", "u_self", false, false),
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let unread = client
+            .get_unread_chat("h", "token", "u_self")
+            .await
+            .unwrap();
+        assert!(!unread);
+    }
+
+    #[tokio::test]
+    async fn get_unread_chat_returns_false_when_all_read() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/history"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                unread_chat_history_msg("m1", "u_other", true, false),
+                unread_chat_history_msg("m2", "u_other", true, true),
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let unread = client
+            .get_unread_chat("h", "token", "u_self")
+            .await
+            .unwrap();
+        assert!(!unread);
+    }
+
+    #[tokio::test]
+    async fn get_unread_chat_swallows_errors_and_returns_false() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/history"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let unread = client
+            .get_unread_chat("h", "token", "u_self")
+            .await
+            .unwrap();
+        // 両方失敗 → false (panic せず正常 return)
+        assert!(!unread);
     }
 }
