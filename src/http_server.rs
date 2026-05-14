@@ -224,13 +224,13 @@ pub fn build_router(state: AppState) -> Router {
     Router::new().merge(index_route).merge(core_router)
 }
 
-/// Core API routes with auth middleware and CORS, without the `/api` index.
+/// Route registration for the core API — no state, no layers.
 ///
-/// Returns an [`OpenApiRouter`] so route registration and OpenAPI generation
-/// stay in lockstep — a route cannot be added without appearing in the spec.
-/// Use this when embedding notecli routes in a larger application that
-/// provides its own index endpoint and merges this into its own spec.
-pub fn build_core_routes(state: AppState) -> OpenApiRouter {
+/// This is the single list of core routes. `routes!` ties each route to its
+/// `#[utoipa::path]` annotation, so a route cannot be registered without
+/// appearing in the OpenAPI spec. Both [`build_core_routes`] (runtime router)
+/// and [`core_openapi`] (state-free spec) are derived from this.
+fn core_openapi_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_accounts))
         .routes(routes!(get_timeline))
@@ -244,9 +244,29 @@ pub fn build_core_routes(state: AppState) -> OpenApiRouter {
         .routes(routes!(get_user_notes))
         .routes(routes!(search_notes))
         .routes(routes!(sse_events))
+}
+
+/// Core API routes with auth middleware and CORS, without the `/api` index.
+///
+/// Returns an [`OpenApiRouter`] so route registration and OpenAPI generation
+/// stay in lockstep. Use this when embedding notecli routes in a larger
+/// application that provides its own index endpoint and merges this into its
+/// own spec.
+pub fn build_core_routes(state: AppState) -> OpenApiRouter {
+    core_openapi_router()
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+/// The core API OpenAPI spec, built without any runtime state.
+///
+/// Lets a host application (e.g. NoteDeck) generate a full merged spec — for
+/// a `/api/openapi.json` endpoint, a Tauri command, or a committed snapshot —
+/// without constructing a database/client. Does **not** include `info`/`tags`;
+/// the host merges this into its own [`ApiDoc`]-based base spec.
+pub fn core_openapi() -> utoipa::openapi::OpenApi {
+    core_openapi_router().split_for_parts().1
 }
 
 /// Derive a flat endpoint list from an OpenAPI spec.
@@ -844,26 +864,15 @@ struct CreateNoteBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use utoipa::Modify;
 
     /// Every core route must appear in the generated OpenAPI spec.
     /// `routes!` makes this structural — this test guards against the
     /// `OpenApiRouter` wiring regressing (e.g. a route dropped from the macro).
     #[test]
     fn core_routes_are_all_in_the_spec() {
-        let (_, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
-            .routes(routes!(list_accounts))
-            .routes(routes!(get_timeline))
-            .routes(routes!(get_notifications))
-            .routes(routes!(create_note))
-            .routes(routes!(get_note, delete_note))
-            .routes(routes!(get_note_children))
-            .routes(routes!(get_note_conversation))
-            .routes(routes!(get_note_reactions, create_reaction, delete_reaction))
-            .routes(routes!(get_user))
-            .routes(routes!(get_user_notes))
-            .routes(routes!(search_notes))
-            .routes(routes!(sse_events))
-            .split_for_parts();
+        let mut openapi = core_openapi();
+        SecurityAddon.modify(&mut openapi);
 
         // 12 distinct paths, 15 operations.
         assert_eq!(openapi.paths.paths.len(), 12, "unexpected path count");
