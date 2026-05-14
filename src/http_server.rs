@@ -6,7 +6,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{delete, get, post},
+    routing::get,
     Json, Router,
 };
 use subtle::ConstantTimeEq;
@@ -18,13 +18,58 @@ use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
+use utoipa::{IntoParams, OpenApi, ToSchema};
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::api::MisskeyClient;
 use crate::db::Database;
 use crate::event_bus::EventBus;
-use crate::models::{AccountPublic, CreateNoteParams, TimelineType};
+use crate::models::{
+    AccountPublic, CreateNoteParams, NormalizedNote, NormalizedNoteReaction,
+    NormalizedNotification, NormalizedUserDetail, TimelineType,
+};
 
 pub const DEFAULT_PORT: u16 = 19820;
+
+// --- OpenAPI ---
+
+/// OpenAPI metadata for the standalone notecli server.
+/// When notecli routes are embedded in a larger app (e.g. NoteDeck), the host
+/// app provides its own `info`/`tags` and merges the `OpenApiRouter` returned
+/// by [`build_core_routes`].
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "notecli API",
+        description = "Headless Misskey client — localhost HTTP API",
+        license(name = "MIT"),
+    ),
+    tags(
+        (name = "accounts", description = "Logged-in accounts"),
+        (name = "timeline", description = "Timelines and user notes"),
+        (name = "notes", description = "Note read / create / delete / reactions"),
+        (name = "users", description = "User profiles"),
+        (name = "search", description = "Note search"),
+        (name = "events", description = "Server-sent event stream"),
+    ),
+    modifiers(&SecurityAddon),
+)]
+pub struct ApiDoc;
+
+/// Registers the `bearer_auth` security scheme. Apply once on the final spec.
+pub struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "bearer_auth",
+            utoipa::openapi::security::SecurityScheme::Http(utoipa::openapi::security::Http::new(
+                utoipa::openapi::security::HttpAuthScheme::Bearer,
+            )),
+        );
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -61,6 +106,15 @@ impl AppState {
 }
 
 // --- Error type ---
+
+/// Error response body returned by all endpoints on failure.
+#[derive(serde::Serialize, ToSchema)]
+pub struct ApiErrorResponse {
+    /// Error code (e.g. "NOT_FOUND", "UNAUTHORIZED")
+    error: String,
+    /// Human-readable error message
+    message: String,
+}
 
 struct ApiError {
     status: StatusCode,
@@ -153,39 +207,77 @@ pub async fn start_on_port(
 /// Full router with `/api` index, auth middleware, and CORS.
 /// Use this for standalone notecli server.
 pub fn build_router(state: AppState) -> Router {
+    let token_path = state.token_path.clone();
+
+    let (core_router, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .merge(build_core_routes(state))
+        .split_for_parts();
+
     let index_route = Router::new()
         .route("/api", get(index))
         .layer(CorsLayer::permissive())
-        .with_state(state.clone());
+        .with_state(IndexState {
+            openapi: Arc::new(openapi),
+            token_path,
+        });
 
-    Router::new()
-        .merge(index_route)
-        .merge(build_core_routes(state))
+    Router::new().merge(index_route).merge(core_router)
 }
 
 /// Core API routes with auth middleware and CORS, without the `/api` index.
+///
+/// Returns an [`OpenApiRouter`] so route registration and OpenAPI generation
+/// stay in lockstep — a route cannot be added without appearing in the spec.
 /// Use this when embedding notecli routes in a larger application that
-/// provides its own index endpoint.
-pub fn build_core_routes(state: AppState) -> Router {
-    Router::new()
-        .route("/api/accounts", get(list_accounts))
-        .route("/api/{host}/timeline/{tl_type}", get(get_timeline))
-        .route("/api/{host}/notifications", get(get_notifications))
-        .route("/api/{host}/note", post(create_note))
-        .route("/api/{host}/notes/{note_id}", get(get_note))
-        .route("/api/{host}/notes/{note_id}", delete(delete_note))
-        .route("/api/{host}/notes/{note_id}/children", get(get_note_children))
-        .route("/api/{host}/notes/{note_id}/conversation", get(get_note_conversation))
-        .route("/api/{host}/notes/{note_id}/reactions", get(get_note_reactions))
-        .route("/api/{host}/notes/{note_id}/reactions", post(create_reaction))
-        .route("/api/{host}/notes/{note_id}/reactions", delete(delete_reaction))
-        .route("/api/{host}/users/{user_id}", get(get_user))
-        .route("/api/{host}/users/{user_id}/notes", get(get_user_notes))
-        .route("/api/{host}/search", get(search_notes))
-        .route("/api/events", get(sse_events))
+/// provides its own index endpoint and merges this into its own spec.
+pub fn build_core_routes(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list_accounts))
+        .routes(routes!(get_timeline))
+        .routes(routes!(get_notifications))
+        .routes(routes!(create_note))
+        .routes(routes!(get_note, delete_note))
+        .routes(routes!(get_note_children))
+        .routes(routes!(get_note_conversation))
+        .routes(routes!(get_note_reactions, create_reaction, delete_reaction))
+        .routes(routes!(get_user))
+        .routes(routes!(get_user_notes))
+        .routes(routes!(search_notes))
+        .routes(routes!(sse_events))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+/// Derive a flat endpoint list from an OpenAPI spec.
+/// The spec is the single source of truth — the `/api` index never maintains
+/// its own hand-written list.
+pub fn endpoints_from_spec(openapi: &utoipa::openapi::OpenApi) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (path, item) in &openapi.paths.paths {
+        for (method, op) in [
+            ("GET", &item.get),
+            ("POST", &item.post),
+            ("PUT", &item.put),
+            ("DELETE", &item.delete),
+            ("PATCH", &item.patch),
+        ] {
+            if let Some(op) = op {
+                let description = op
+                    .description
+                    .clone()
+                    .or_else(|| op.summary.clone())
+                    .unwrap_or_default();
+                out.push(json!({ "method": method, "path": path, "description": description }));
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        let ka = (a["path"].as_str().unwrap_or(""), a["method"].as_str().unwrap_or(""));
+        let kb = (b["path"].as_str().unwrap_or(""), b["method"].as_str().unwrap_or(""));
+        ka.cmp(&kb)
+    });
+    out
 }
 
 // --- Auth middleware ---
@@ -214,33 +306,33 @@ async fn auth_middleware(
 
 // --- Handlers ---
 
-async fn index(State(state): State<AppState>) -> Json<Value> {
+/// State for the `/api` index route — carries the generated spec so the
+/// endpoint list is always derived, never hand-maintained.
+#[derive(Clone)]
+struct IndexState {
+    openapi: Arc<utoipa::openapi::OpenApi>,
+    token_path: String,
+}
+
+async fn index(State(state): State<IndexState>) -> Json<Value> {
     Json(json!({
         "name": "notecli",
         "version": env!("CARGO_PKG_VERSION"),
         "auth": "Bearer token required. Read token from the file at tokenPath.",
         "tokenPath": state.token_path,
-        "endpoints": [
-            { "method": "GET",    "path": "/api",                                  "description": "This endpoint list" },
-            { "method": "GET",    "path": "/api/accounts",                         "description": "List accounts (no tokens)" },
-            { "method": "GET",    "path": "/api/{host}/timeline/{type}",           "description": "Get timeline notes" },
-            { "method": "GET",    "path": "/api/{host}/notifications",             "description": "Get notifications" },
-            { "method": "POST",   "path": "/api/{host}/note",                      "description": "Create a note" },
-            { "method": "GET",    "path": "/api/{host}/search?q=...",              "description": "Search notes" },
-            { "method": "GET",    "path": "/api/{host}/notes/{id}",                "description": "Get a note" },
-            { "method": "DELETE", "path": "/api/{host}/notes/{id}",                "description": "Delete a note" },
-            { "method": "GET",    "path": "/api/{host}/notes/{id}/children",       "description": "Get note replies" },
-            { "method": "GET",    "path": "/api/{host}/notes/{id}/conversation",   "description": "Get note conversation" },
-            { "method": "GET",    "path": "/api/{host}/notes/{id}/reactions",      "description": "Get note reactions" },
-            { "method": "POST",   "path": "/api/{host}/notes/{id}/reactions",      "description": "Add reaction" },
-            { "method": "DELETE", "path": "/api/{host}/notes/{id}/reactions",      "description": "Remove reaction" },
-            { "method": "GET",    "path": "/api/{host}/users/{id}",                "description": "Get user detail" },
-            { "method": "GET",    "path": "/api/{host}/users/{id}/notes",          "description": "Get user notes" },
-            { "method": "GET",    "path": "/api/events",                           "description": "SSE event stream" },
-        ]
+        "docs": "See /api/openapi.json when embedded in NoteDeck.",
+        "endpoints": endpoints_from_spec(&state.openapi),
     }))
 }
 
+#[utoipa::path(
+    get, path = "/api/accounts", tag = "accounts",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Logged-in accounts (tokens stripped)", body = Vec<AccountPublic>),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+    )
+)]
 async fn list_accounts(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AccountPublic>>, ApiError> {
@@ -248,6 +340,20 @@ async fn list_accounts(
     Ok(Json(accounts.iter().map(AccountPublic::from).collect()))
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/timeline/{tl_type}", tag = "timeline",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host (e.g. misskey.io)"),
+        ("tl_type" = String, Path, description = "Timeline type: home | local | social | global"),
+        TimelineQueryParams,
+    ),
+    responses(
+        (status = 200, description = "Timeline notes", body = Vec<NormalizedNote>),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "No account for host", body = ApiErrorResponse),
+    )
+)]
 async fn get_timeline(
     State(state): State<AppState>,
     Path((host, tl_type)): Path<(String, String)>,
@@ -264,6 +370,19 @@ async fn get_timeline(
     Ok(Json(notes))
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/notifications", tag = "timeline",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        TimelineQueryParams,
+    ),
+    responses(
+        (status = 200, description = "Notifications", body = Vec<NormalizedNotification>),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "No account for host", body = ApiErrorResponse),
+    )
+)]
 async fn get_notifications(
     State(state): State<AppState>,
     Path(host): Path<String>,
@@ -279,6 +398,17 @@ async fn get_notifications(
     Ok(Json(notifications))
 }
 
+#[utoipa::path(
+    post, path = "/api/{host}/note", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(("host" = String, Path, description = "Account host")),
+    request_body = CreateNoteBody,
+    responses(
+        (status = 200, description = "Created note", body = NormalizedNote),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "No account for host", body = ApiErrorResponse),
+    )
+)]
 async fn create_note(
     State(state): State<AppState>,
     Path(host): Path<String>,
@@ -305,6 +435,20 @@ async fn create_note(
     Ok(Json(note))
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/search", tag = "search",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        SearchQueryParams,
+    ),
+    responses(
+        (status = 200, description = "Matching notes", body = Vec<NormalizedNote>),
+        (status = 400, description = "Missing query parameter: q", body = ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "No account for host", body = ApiErrorResponse),
+    )
+)]
 async fn search_notes(
     State(state): State<AppState>,
     Path(host): Path<String>,
@@ -327,6 +471,19 @@ async fn search_notes(
     Ok(Json(notes))
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/notes/{note_id}", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("note_id" = String, Path, description = "Note ID"),
+    ),
+    responses(
+        (status = 200, description = "Note", body = NormalizedNote),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "Note or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn get_note(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
@@ -340,6 +497,19 @@ async fn get_note(
     Ok(Json(note))
 }
 
+#[utoipa::path(
+    delete, path = "/api/{host}/notes/{note_id}", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("note_id" = String, Path, description = "Note ID"),
+    ),
+    responses(
+        (status = 204, description = "Note deleted"),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "Note or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn delete_note(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
@@ -350,6 +520,20 @@ async fn delete_note(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/notes/{note_id}/children", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("note_id" = String, Path, description = "Note ID"),
+        LimitQueryParams,
+    ),
+    responses(
+        (status = 200, description = "Direct replies to the note", body = Vec<NormalizedNote>),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "Note or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn get_note_children(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
@@ -365,6 +549,20 @@ async fn get_note_children(
     Ok(Json(notes))
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/notes/{note_id}/conversation", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("note_id" = String, Path, description = "Note ID"),
+        LimitQueryParams,
+    ),
+    responses(
+        (status = 200, description = "Ancestor notes (conversation thread)", body = Vec<NormalizedNote>),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "Note or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn get_note_conversation(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
@@ -380,6 +578,20 @@ async fn get_note_conversation(
     Ok(Json(notes))
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/notes/{note_id}/reactions", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("note_id" = String, Path, description = "Note ID"),
+        ReactionQueryParams,
+    ),
+    responses(
+        (status = 200, description = "Reactions on the note", body = Vec<NormalizedNoteReaction>),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "Note or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn get_note_reactions(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
@@ -395,6 +607,20 @@ async fn get_note_reactions(
     Ok(Json(reactions))
 }
 
+#[utoipa::path(
+    post, path = "/api/{host}/notes/{note_id}/reactions", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("note_id" = String, Path, description = "Note ID"),
+    ),
+    request_body = ReactionBody,
+    responses(
+        (status = 204, description = "Reaction added"),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "Note or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn create_reaction(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
@@ -409,6 +635,19 @@ async fn create_reaction(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete, path = "/api/{host}/notes/{note_id}/reactions", tag = "notes",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("note_id" = String, Path, description = "Note ID"),
+    ),
+    responses(
+        (status = 204, description = "Reaction removed"),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "Note or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn delete_reaction(
     State(state): State<AppState>,
     Path((host, note_id)): Path<(String, String)>,
@@ -422,6 +661,19 @@ async fn delete_reaction(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/users/{user_id}", tag = "users",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("user_id" = String, Path, description = "User ID"),
+    ),
+    responses(
+        (status = 200, description = "User profile detail", body = NormalizedUserDetail),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "User or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn get_user(
     State(state): State<AppState>,
     Path((host, user_id)): Path<(String, String)>,
@@ -435,6 +687,20 @@ async fn get_user(
     Ok(Json(user))
 }
 
+#[utoipa::path(
+    get, path = "/api/{host}/users/{user_id}/notes", tag = "users",
+    security(("bearer_auth" = [])),
+    params(
+        ("host" = String, Path, description = "Account host"),
+        ("user_id" = String, Path, description = "User ID"),
+        TimelineQueryParams,
+    ),
+    responses(
+        (status = 200, description = "Notes authored by the user", body = Vec<NormalizedNote>),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+        (status = 404, description = "User or account not found", body = ApiErrorResponse),
+    )
+)]
 async fn get_user_notes(
     State(state): State<AppState>,
     Path((host, user_id)): Path<(String, String)>,
@@ -450,6 +716,19 @@ async fn get_user_notes(
     Ok(Json(notes))
 }
 
+#[utoipa::path(
+    get, path = "/api/events", tag = "events",
+    security(("bearer_auth" = [])),
+    params(SseQueryParams),
+    responses(
+        (status = 200,
+         description = "Server-sent event stream (`text/event-stream`). Each event \
+            carries an `event:` type and a JSON `data:` payload. OpenAPI cannot model \
+            a streaming body, so the schema is shown as a string.",
+         content_type = "text/event-stream", body = String),
+        (status = 401, description = "Unauthorized", body = ApiErrorResponse),
+    )
+)]
 async fn sse_events(
     State(state): State<AppState>,
     Query(params): Query<SseQueryParams>,
@@ -483,10 +762,14 @@ async fn sse_events(
 
 // --- Query / Body types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct TimelineQueryParams {
+    /// Max number of items to return (default 20)
     limit: Option<i64>,
+    /// Return items newer than this ID
     since_id: Option<String>,
+    /// Return items older than this ID
     until_id: Option<String>,
 }
 
@@ -500,41 +783,114 @@ impl TimelineQueryParams {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SearchQueryParams {
+    /// Search query string (required)
     q: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct LimitQueryParams {
+    /// Max number of items to return (default 20)
     limit: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ReactionQueryParams {
+    /// Filter by reaction type
     r#type: Option<String>,
+    /// Max number of reactions to return (default 20)
     limit: Option<u32>,
+    /// Return reactions older than this ID
     until_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct ReactionBody {
+    /// Reaction emoji (e.g. "👍" or ":custom_emoji:")
     reaction: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SseQueryParams {
+    /// Comma-separated event type prefixes to filter the stream
     r#type: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct CreateNoteBody {
+    /// Note body text
     text: String,
+    /// Content warning
     cw: Option<String>,
+    /// Visibility: public | home | followers | specified
     visibility: Option<String>,
+    /// Federate locally only
     local_only: Option<bool>,
+    /// Reply target note ID
     reply_id: Option<String>,
+    /// Renote target note ID
     renote_id: Option<String>,
+    /// Attached drive file IDs
     file_ids: Option<Vec<String>>,
+    /// Schedule the note for this ISO-8601 timestamp
     scheduled_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every core route must appear in the generated OpenAPI spec.
+    /// `routes!` makes this structural — this test guards against the
+    /// `OpenApiRouter` wiring regressing (e.g. a route dropped from the macro).
+    #[test]
+    fn core_routes_are_all_in_the_spec() {
+        let (_, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+            .routes(routes!(list_accounts))
+            .routes(routes!(get_timeline))
+            .routes(routes!(get_notifications))
+            .routes(routes!(create_note))
+            .routes(routes!(get_note, delete_note))
+            .routes(routes!(get_note_children))
+            .routes(routes!(get_note_conversation))
+            .routes(routes!(get_note_reactions, create_reaction, delete_reaction))
+            .routes(routes!(get_user))
+            .routes(routes!(get_user_notes))
+            .routes(routes!(search_notes))
+            .routes(routes!(sse_events))
+            .split_for_parts();
+
+        // 12 distinct paths, 15 operations.
+        assert_eq!(openapi.paths.paths.len(), 12, "unexpected path count");
+        let op_count: usize = openapi
+            .paths
+            .paths
+            .values()
+            .map(|item| {
+                [&item.get, &item.post, &item.put, &item.delete, &item.patch]
+                    .iter()
+                    .filter(|o| o.is_some())
+                    .count()
+            })
+            .sum();
+        assert_eq!(op_count, 15, "unexpected operation count");
+
+        // bearer_auth scheme is registered by SecurityAddon.
+        assert!(openapi
+            .components
+            .as_ref()
+            .is_some_and(|c| c.security_schemes.contains_key("bearer_auth")));
+    }
+
+    #[test]
+    fn endpoints_are_derived_from_spec() {
+        let openapi = ApiDoc::openapi();
+        // ApiDoc alone has no paths; the derived list is empty until routes merge in.
+        assert!(endpoints_from_spec(&openapi).is_empty());
+    }
 }

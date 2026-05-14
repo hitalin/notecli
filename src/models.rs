@@ -35,7 +35,7 @@ impl Drop for Account {
 }
 
 /// Token を含まない、フロントエンド向け Account 構造体
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct AccountPublic {
@@ -101,7 +101,7 @@ pub struct StoredServer {
 
 // --- Normalized models (sent to frontend via IPC) ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedNote {
@@ -155,13 +155,15 @@ pub struct NormalizedNote {
     pub mode_flags: HashMap<String, bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "specta", specta(type = Option<Box<serde_json::Value>>))]
+    #[schema(no_recursion)]
     pub reply: Option<Box<NormalizedNote>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "specta", specta(type = Option<Box<serde_json::Value>>))]
+    #[schema(no_recursion)]
     pub renote: Option<Box<NormalizedNote>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct AvatarDecoration {
@@ -177,7 +179,7 @@ pub struct AvatarDecoration {
     pub offset_y: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct UserInstance {
@@ -187,7 +189,7 @@ pub struct UserInstance {
     pub theme_color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedUser {
@@ -208,7 +210,7 @@ pub struct NormalizedUser {
     pub instance: Option<UserInstance>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct UserRole {
@@ -221,14 +223,14 @@ pub struct UserRole {
     pub display_order: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct UserField {
     pub name: String,
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedUserDetail {
@@ -279,7 +281,7 @@ pub struct NormalizedUserDetail {
     pub followed_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedPoll {
@@ -289,7 +291,7 @@ pub struct NormalizedPoll {
     pub expires_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedPollChoice {
@@ -300,7 +302,7 @@ pub struct NormalizedPollChoice {
     pub is_voted: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedDriveFile {
@@ -316,7 +318,7 @@ pub struct NormalizedDriveFile {
     pub is_sensitive: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ReactionInfo {
@@ -324,7 +326,7 @@ pub struct ReactionInfo {
     pub reaction: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedNotification {
@@ -855,7 +857,7 @@ pub struct Clip {
     pub notes_count: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Channel {
@@ -1293,7 +1295,7 @@ pub struct RawNoteReaction {
     pub reaction_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NormalizedNoteReaction {
