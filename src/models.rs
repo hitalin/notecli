@@ -917,6 +917,8 @@ pub struct ChatUser {
     pub avatar_url: Option<String>,
     #[serde(default)]
     pub emojis: HashMap<String, String>,
+    #[serde(default)]
+    pub avatar_decorations: Vec<AvatarDecoration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
