@@ -1985,7 +1985,9 @@ impl MisskeyClient {
         let data = self
             .request(host, token, "chat/messages/create-to-user", body)
             .await?;
-        let message: ChatMessage = serde_json::from_value(data)?;
+        let mut message: ChatMessage = serde_json::from_value(data)?;
+        self.hydrate_chat_message_users(host, token, std::slice::from_mut(&mut message))
+            .await;
         Ok(message)
     }
 
@@ -2009,7 +2011,9 @@ impl MisskeyClient {
         let data = self
             .request(host, token, "chat/messages/create-to-room", body)
             .await?;
-        let message: ChatMessage = serde_json::from_value(data)?;
+        let mut message: ChatMessage = serde_json::from_value(data)?;
+        self.hydrate_chat_message_users(host, token, std::slice::from_mut(&mut message))
+            .await;
         Ok(message)
     }
 
@@ -3113,6 +3117,51 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].from_user.is_none());
         assert!(msgs[0].to_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_chat_message_to_user_hydrates_sender() {
+        // 送信レスポンス (create-to-user) は fromUser を含まないため、自分の
+        // メッセージにアバターが出ない。hydrate で送信者を補完する。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/messages/create-to-user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "m1",
+                "createdAt": "2025-01-01T00:00:00.000Z",
+                "fromUserId": "u_self",
+                "toUserId": "u_other",
+                "toRoomId": null,
+                "text": "hi",
+                "fileId": null,
+                "file": null,
+                "isRead": null,
+                "reactions": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": "u_self", "username": "me", "name": "Me",
+                 "host": null, "avatarUrl": "https://example.com/me.png", "emojis": {},
+                 "avatarDecorations": [{"id": "d1", "url": "https://example.com/d1.png"}]},
+                {"id": "u_other", "username": "they", "name": "They",
+                 "host": null, "avatarUrl": null, "emojis": {}}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let msg = client
+            .create_chat_message_to_user("h", "token", "u_other", Some("hi"), None)
+            .await
+            .unwrap();
+        let from = msg.from_user.as_ref().unwrap();
+        assert_eq!(from.username, "me");
+        assert_eq!(from.avatar_decorations.len(), 1);
+        assert_eq!(msg.to_user.as_ref().unwrap().username, "they");
     }
 
     // --- Unread chat (#469: messaging/unread → chat/history isRead 集計) ---
