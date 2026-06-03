@@ -1901,24 +1901,33 @@ impl MisskeyClient {
         Ok(users)
     }
 
-    /// `chat/messages/{user|room}-timeline` と WS chat:message が
-    /// Misskey 本家の Lite packer 固定で `fromUser`/`toUser` を含まない
-    /// (#460) のを補完する。null になっている `from_user` / `to_user` を
-    /// `users/show?userIds=[...]` で 1 リクエストにまとめて hydrate する。
-    /// 失敗しても null のまま継続する best-effort 動作。
+    /// `chat/messages/{user|room}-timeline` と WS chat:message の
+    /// `fromUser` / `toUser` を `users/show?userIds=[...]` で 1 リクエストに
+    /// まとめて hydrate する。失敗しても元のまま継続する best-effort 動作。
+    ///
+    /// 補完対象は「user が null」のときだけでなく「user は埋め込まれているが
+    /// `avatarDecorations` が空」のときも含む。1on1 (`packMessageLiteFor1on1`)
+    /// は `fromUser` を一切含まないため null 補完で足りるが、room
+    /// (`packMessageLiteForRoom`) は `fromUser` を埋め込むため hydrate を
+    /// 一切経由せず、サーバーがデコを埋め込まないとアバターデコが永遠に
+    /// 出ない。デコ欠落を hydrate のトリガーにすることで room も 1on1 と
+    /// 同じ経路に乗せる。
     pub(crate) async fn hydrate_chat_message_users(
         &self,
         host: &str,
         token: &str,
         messages: &mut [ChatMessage],
     ) {
+        fn needs_hydration(u: Option<&ChatUser>) -> bool {
+            u.is_none_or(|u| u.avatar_decorations.is_empty())
+        }
         let mut needed: HashSet<String> = HashSet::new();
         for m in messages.iter() {
-            if m.from_user.is_none() {
+            if needs_hydration(m.from_user.as_ref()) {
                 needed.insert(m.from_user_id.clone());
             }
             if let Some(uid) = &m.to_user_id {
-                if m.to_user.is_none() {
+                if needs_hydration(m.to_user.as_ref()) {
                     needed.insert(uid.clone());
                 }
             }
@@ -1937,14 +1946,14 @@ impl MisskeyClient {
         let user_map: HashMap<String, ChatUser> =
             users.into_iter().map(|u| (u.id.clone(), u)).collect();
         for m in messages.iter_mut() {
-            if m.from_user.is_none() {
+            if needs_hydration(m.from_user.as_ref()) {
                 if let Some(u) = user_map.get(&m.from_user_id) {
                     m.from_user = Some(u.clone());
                 }
             }
             let to_uid = m.to_user_id.clone();
             if let Some(uid) = to_uid {
-                if m.to_user.is_none() {
+                if needs_hydration(m.to_user.as_ref()) {
                     if let Some(u) = user_map.get(&uid) {
                         m.to_user = Some(u.clone());
                     }
@@ -2984,15 +2993,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hydrate_keeps_existing_user_and_skips_show() {
+    async fn hydrate_keeps_user_with_decorations_and_skips_show() {
         let server = MockServer::start().await;
-        // user-show は呼ばれないはず (既に fromUser/toUser non-null)
+        // 埋め込み fromUser が既にデコを持つなら users/show は呼ばれない
         Mock::given(method("POST"))
             .and(path("/api/users/show"))
             .respond_with(ResponseTemplate::new(500))
             .expect(0)
             .mount(&server)
             .await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat/messages/room-timeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": "m1",
+                "createdAt": "2025-01-01T00:00:00.000Z",
+                "fromUserId": "u1",
+                "fromUser": {
+                    "id": "u1", "username": "alice", "name": "Alice",
+                    "host": null, "avatarUrl": null, "emojis": {},
+                    "avatarDecorations": [{"id": "d1", "url": "https://example.com/d1.png"}]
+                },
+                "toUserId": null,
+                "toUser": null,
+                "toRoomId": "r1",
+                "toRoom": {"id": "r1", "name": "Room", "description": null},
+                "text": "hi",
+                "fileId": null,
+                "file": null,
+                "isRead": null,
+                "reactions": []
+            }])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let msgs = client
+            .get_chat_room_messages("h", "token", "r1", 30, None, None)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        let from = msgs[0].from_user.as_ref().unwrap();
+        assert_eq!(from.username, "alice");
+        assert_eq!(from.avatar_decorations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hydrate_refetches_room_user_missing_decorations() {
+        // room-timeline は fromUser を埋め込むが Misskey が avatarDecorations を
+        // 含めない場合がある。デコ欠落を hydrate トリガーにして users/show で
+        // 補完することで、グループチャットでもアバターデコが出るようにする。
+        let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat/messages/room-timeline"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
@@ -3015,6 +3065,16 @@ mod tests {
             }])))
             .mount(&server)
             .await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": "u1", "username": "alice", "name": "Alice",
+                "host": null, "avatarUrl": null, "emojis": {},
+                "avatarDecorations": [{"id": "d1", "url": "https://example.com/d1.png"}]
+            }])))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let client = MisskeyClient::with_base_url(&server.uri());
         let msgs = client
@@ -3022,7 +3082,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].from_user.as_ref().unwrap().username, "alice");
+        let from = msgs[0].from_user.as_ref().unwrap();
+        assert_eq!(from.username, "alice");
+        assert_eq!(from.avatar_decorations.len(), 1);
+        assert_eq!(from.avatar_decorations[0].id, "d1");
     }
 
     #[tokio::test]
