@@ -279,6 +279,15 @@ pub struct NormalizedUserDetail {
     pub followers_visibility: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub followed_message: Option<String>,
+    /// このユーザーに対する自分用メモ (users/update-memo)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memo: Option<String>,
+    /// フォロー中のみ意味を持つ: 'normal' | 'none' (投稿通知)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
+    /// フォロー中のみ意味を持つ: TL に他者への返信を含めるか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_replies: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -495,12 +504,36 @@ pub struct UserList {
     pub liked_count: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Antenna {
     pub id: String,
     pub name: String,
+    /// 'home' | 'all' | 'users' | 'list' | 'users_blacklist'
+    #[serde(default)]
+    pub src: String,
+    #[serde(default)]
+    pub user_list_id: Option<String>,
+    /// ソースが 'users' / 'users_blacklist' のときの対象 (["@user@host", ...])
+    #[serde(default)]
+    pub users: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<Vec<String>>,
+    #[serde(default)]
+    pub exclude_keywords: Vec<Vec<String>>,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub local_only: bool,
+    #[serde(default)]
+    pub exclude_bots: bool,
+    #[serde(default)]
+    pub with_replies: bool,
+    #[serde(default)]
+    pub with_file: bool,
+    #[serde(default)]
+    pub notify: bool,
 }
 
 // =============================================================================
@@ -940,6 +973,9 @@ pub struct SearchOptions {
     pub until_id: Option<String>,
     pub since_date: Option<i64>,
     pub until_date: Option<i64>,
+    /// 指定ユーザーのノートのみに絞る (notes/search の userId)
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 impl SearchOptions {
@@ -950,6 +986,7 @@ impl SearchOptions {
             until_id: None,
             since_date: None,
             until_date: None,
+            user_id: None,
         }
     }
 
@@ -966,6 +1003,7 @@ impl Default for SearchOptions {
             until_id: None,
             since_date: None,
             until_date: None,
+            user_id: None,
         }
     }
 }
@@ -1173,6 +1211,12 @@ pub struct RawUserDetail {
     #[serde(default)]
     pub followers_visibility: Option<String>,
     pub followed_message: Option<String>,
+    #[serde(default)]
+    pub memo: Option<String>,
+    #[serde(default)]
+    pub notify: Option<String>,
+    #[serde(default)]
+    pub with_replies: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1397,6 +1441,9 @@ impl RawUserDetail {
             following_visibility: self.following_visibility,
             followers_visibility: self.followers_visibility,
             followed_message: self.followed_message,
+            memo: self.memo,
+            notify: self.notify,
+            with_replies: self.with_replies,
         }
     }
 }

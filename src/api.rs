@@ -242,6 +242,48 @@ impl MisskeyClient {
         Ok(antennas)
     }
 
+    /// 単一アンテナの設定を取得する (antennas/show)。
+    pub async fn get_antenna(
+        &self,
+        host: &str,
+        token: &str,
+        antenna_id: &str,
+    ) -> Result<Antenna, NoteDeckError> {
+        let data = self
+            .request(host, token, "antennas/show", json!({ "antennaId": antenna_id }))
+            .await?;
+        let antenna: Antenna = serde_json::from_value(data)?;
+        Ok(antenna)
+    }
+
+    /// アンテナ設定を更新する (antennas/update)。
+    /// 本家 API は全フィールドを要求するため、変更済みの `Antenna` をそのまま往復させる。
+    pub async fn update_antenna(
+        &self,
+        host: &str,
+        token: &str,
+        antenna: &Antenna,
+    ) -> Result<Antenna, NoteDeckError> {
+        let body = json!({
+            "antennaId": antenna.id,
+            "name": antenna.name,
+            "src": antenna.src,
+            "userListId": antenna.user_list_id,
+            "users": antenna.users,
+            "keywords": antenna.keywords,
+            "excludeKeywords": antenna.exclude_keywords,
+            "caseSensitive": antenna.case_sensitive,
+            "localOnly": antenna.local_only,
+            "excludeBots": antenna.exclude_bots,
+            "withReplies": antenna.with_replies,
+            "withFile": antenna.with_file,
+            "notify": antenna.notify,
+        });
+        let data = self.request(host, token, "antennas/update", body).await?;
+        let updated: Antenna = serde_json::from_value(data)?;
+        Ok(updated)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn get_antenna_notes(
         &self,
@@ -814,6 +856,9 @@ impl MisskeyClient {
         if let Some(d) = options.until_date {
             params["untilDate"] = json!(d);
         }
+        if let Some(ref uid) = options.user_id {
+            params["userId"] = json!(uid);
+        }
         let data = self.request(host, token, "notes/search", params).await?;
         let raw: Vec<RawNote> = serde_json::from_value(data)?;
         Ok(raw
@@ -1129,6 +1174,47 @@ impl MisskeyClient {
             token,
             "following/invalidate",
             json!({ "userId": user_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// フォロー設定を更新する (following/update)。
+    /// `notify` は 'normal' | 'none'、`with_replies` は TL に他者宛て返信を含めるか。
+    /// いずれも指定されたものだけを送信する。
+    pub async fn update_following(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+        notify: Option<&str>,
+        with_replies: Option<bool>,
+    ) -> Result<(), NoteDeckError> {
+        let mut body = json!({ "userId": user_id });
+        if let Some(n) = notify {
+            body["notify"] = json!(n);
+        }
+        if let Some(w) = with_replies {
+            body["withReplies"] = json!(w);
+        }
+        self.request(host, token, "following/update", body).await?;
+        Ok(())
+    }
+
+    /// このユーザーに対する自分用メモを更新する (users/update-memo)。
+    /// 空文字を渡すとメモが削除される (本家挙動準拠)。
+    pub async fn update_user_memo(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+        memo: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "users/update-memo",
+            json!({ "userId": user_id, "memo": memo }),
         )
         .await?;
         Ok(())
@@ -2366,7 +2452,7 @@ impl MisskeyClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn raw_note_json(id: &str, text: &str) -> Value {
@@ -3271,5 +3357,177 @@ mod tests {
             .unwrap();
         // 両方失敗 → false (panic せず正常 return)
         assert!(!unread);
+    }
+
+    #[tokio::test]
+    async fn update_following_sends_notify_and_with_replies() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/following/update"))
+            .and(body_partial_json(
+                json!({ "userId": "u1", "notify": "none", "withReplies": true }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client
+            .update_following("h", "token", "u1", Some("none"), Some(true))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_following_omits_unset_fields() {
+        let server = MockServer::start().await;
+        // withReplies のみ指定 → notify は body に含まれないこと
+        Mock::given(method("POST"))
+            .and(path("/api/following/update"))
+            .and(body_partial_json(json!({ "userId": "u1", "withReplies": false })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client
+            .update_following("h", "token", "u1", None, Some(false))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_user_memo_sends_memo() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/update-memo"))
+            .and(body_partial_json(json!({ "userId": "u1", "memo": "friend" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client
+            .update_user_memo("h", "token", "u1", "friend")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_antenna_parses_full_entity() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/antennas/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "a1",
+                "name": "friends",
+                "src": "users",
+                "users": ["@alice@example.com"],
+                "keywords": [],
+                "excludeKeywords": [],
+                "caseSensitive": false,
+                "localOnly": false,
+                "excludeBots": false,
+                "withReplies": false,
+                "withFile": false,
+                "notify": false
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let antenna = client.get_antenna("h", "token", "a1").await.unwrap();
+        assert_eq!(antenna.src, "users");
+        assert_eq!(antenna.users, vec!["@alice@example.com".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn update_antenna_round_trips_users() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/antennas/update"))
+            .and(body_partial_json(json!({
+                "antennaId": "a1",
+                "src": "users",
+                "users": ["@alice@example.com", "@bob@example.com"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "a1",
+                "name": "friends",
+                "src": "users",
+                "users": ["@alice@example.com", "@bob@example.com"]
+            })))
+            .mount(&server)
+            .await;
+
+        let antenna = Antenna {
+            id: "a1".to_string(),
+            name: "friends".to_string(),
+            src: "users".to_string(),
+            user_list_id: None,
+            users: vec![
+                "@alice@example.com".to_string(),
+                "@bob@example.com".to_string(),
+            ],
+            keywords: vec![],
+            exclude_keywords: vec![],
+            case_sensitive: false,
+            local_only: false,
+            exclude_bots: false,
+            with_replies: false,
+            with_file: false,
+            notify: false,
+        };
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let updated = client.update_antenna("h", "token", &antenna).await.unwrap();
+        assert_eq!(updated.users.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_notes_sends_user_id_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/notes/search"))
+            .and(body_partial_json(json!({ "query": "rust", "userId": "u1" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([raw_note_json("n1", "rust note")])),
+            )
+            .mount(&server)
+            .await;
+
+        let mut options = SearchOptions::default();
+        options.user_id = Some("u1".to_string());
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let notes = client
+            .search_notes("h", "token", "acc1", "rust", options)
+            .await
+            .unwrap();
+        assert_eq!(notes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_user_detail_parses_memo_notify_with_replies() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "u1",
+                "username": "taka",
+                "host": null,
+                "name": "Taka",
+                "createdAt": "2024-01-01T00:00:00.000Z",
+                "memo": "my note",
+                "notify": "normal",
+                "withReplies": true
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let user = client.get_user_detail("h", "token", "u1").await.unwrap();
+        assert_eq!(user.memo.as_deref(), Some("my note"));
+        assert_eq!(user.notify.as_deref(), Some("normal"));
+        assert_eq!(user.with_replies, Some(true));
     }
 }
