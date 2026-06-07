@@ -2240,6 +2240,42 @@ impl MisskeyClient {
         Ok(())
     }
 
+    /// 自分がミュート中のユーザー ID 一覧を取得する（`mute/list` を全ページ走査）。
+    /// #574: 起動時にフロントの mute store を hydrate し、過去ノートを即時非表示にする。
+    pub async fn muted_user_ids(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Vec<String>, NoteDeckError> {
+        const PAGE: usize = 100;
+        let mut ids = Vec::new();
+        let mut until_id: Option<String> = None;
+        loop {
+            let mut params = json!({ "limit": PAGE });
+            apply_pagination(&mut params, None, until_id.as_deref());
+            let data = self.request(host, token, "mute/list", params).await?;
+            let Some(arr) = data.as_array() else { break };
+            if arr.is_empty() {
+                break;
+            }
+            for item in arr {
+                if let Some(mutee_id) = item.get("muteeId").and_then(|v| v.as_str()) {
+                    ids.push(mutee_id.to_string());
+                }
+            }
+            // 次ページの起点は Muting レコードの id（mutee の id ではない）。
+            until_id = arr
+                .last()
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if arr.len() < PAGE || until_id.is_none() {
+                break;
+            }
+        }
+        Ok(ids)
+    }
+
     pub async fn renote_mute_user(
         &self,
         host: &str,
@@ -2492,6 +2528,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn muted_user_ids_collects_mutee_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/mute/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": "muting1", "muteeId": "userA", "mutee": { "id": "userA" } },
+                { "id": "muting2", "muteeId": "userB", "mutee": { "id": "userB" } }
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let ids = client.muted_user_ids("h", "token").await.unwrap();
+        assert_eq!(ids, vec!["userA".to_string(), "userB".to_string()]);
     }
 
     #[tokio::test]
