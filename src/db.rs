@@ -1086,10 +1086,8 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![account_id, limit], Self::row_to_chat_message)?;
         let mut msgs = Vec::new();
-        for row in rows {
-            if let Ok(m) = row {
-                msgs.push(m);
-            }
+        for m in rows.flatten() {
+            msgs.push(m);
         }
         Ok(msgs)
     }

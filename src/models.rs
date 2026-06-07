@@ -1754,8 +1754,8 @@ mod tests {
         j["unrelatedField"] = json!("ignored");
         let raw: RawNote = serde_json::from_value(j).unwrap();
         let note = raw.normalize("acc1", "misskey.io");
-        assert_eq!(*note.mode_flags.get("isNoteInYamiMode").unwrap(), true);
-        assert_eq!(*note.mode_flags.get("isNoteInSuperMode").unwrap(), false);
+        assert!(*note.mode_flags.get("isNoteInYamiMode").unwrap());
+        assert!(!*note.mode_flags.get("isNoteInSuperMode").unwrap());
         assert!(!note.mode_flags.contains_key("unrelatedField"));
     }
 
