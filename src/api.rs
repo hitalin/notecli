@@ -10,9 +10,9 @@ use crate::error::NoteDeckError;
 use crate::models::{
     Antenna, AuthResult, Channel, ChatMessage, ChatUser, Clip, CreateNoteParams,
     NormalizedDriveFile, NormalizedNote, NormalizedNoteReaction, NormalizedNotification,
-    NormalizedUser, NormalizedUserDetail, RawCreateNoteResponse, RawDriveFile, RawEmojisResponse,
-    RawMiAuthResponse, RawNote, RawNoteReaction, RawNotification, RawUser, RawUserDetail,
-    SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
+    MutedWordsResult, NormalizedUser, NormalizedUserDetail, RawCreateNoteResponse, RawDriveFile,
+    RawEmojisResponse, RawMiAuthResponse, RawNote, RawNoteReaction, RawNotification, RawUser,
+    RawUserDetail, SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
 };
 
 /// Maximum response body size (50 MB) to prevent memory exhaustion from malicious servers.
@@ -2274,6 +2274,30 @@ impl MisskeyClient {
             }
         }
         Ok(ids)
+    }
+
+    /// `i`(meDetailed) から `mutedWords` / `hardMutedWords` を取得する（read のみ、#610）。
+    /// 想定外の要素形は serde untagged で取り切れない場合があるため、欠損時は空配列にフォールバック。
+    pub async fn muted_words(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<MutedWordsResult, NoteDeckError> {
+        let data = self.request(host, token, "i", json!({})).await?;
+        let muted_words = data
+            .get("mutedWords")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let hard_muted_words = data
+            .get("hardMutedWords")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        Ok(MutedWordsResult {
+            muted_words,
+            hard_muted_words,
+        })
     }
 
     pub async fn renote_mute_user(
