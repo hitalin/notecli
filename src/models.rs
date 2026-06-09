@@ -1237,6 +1237,8 @@ pub enum MutedWord {
 pub struct MutedWordsResult {
     pub muted_words: Vec<MutedWord>,
     pub hard_muted_words: Vec<MutedWord>,
+    /// インスタンスミュート（#613）。ミュート対象ホスト名の配列。同じ `i` から取得。
+    pub muted_instances: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -2294,10 +2294,54 @@ impl MisskeyClient {
             .cloned()
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
+        let muted_instances = data
+            .get("mutedInstances")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
         Ok(MutedWordsResult {
             muted_words,
             hard_muted_words,
+            muted_instances,
         })
+    }
+
+    /// renote mute 中のユーザー ID 一覧を取得する（#614: 起動時の renote mute store hydrate）。
+    /// `renote-mute/list` は RenoteMuting レコード配列を返すため muteeId を抽出する。
+    pub async fn renote_muted_user_ids(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Vec<String>, NoteDeckError> {
+        const PAGE: usize = 100;
+        let mut ids = Vec::new();
+        let mut until_id: Option<String> = None;
+        loop {
+            let mut params = json!({ "limit": PAGE });
+            apply_pagination(&mut params, None, until_id.as_deref());
+            let data = self
+                .request(host, token, "renote-mute/list", params)
+                .await?;
+            let Some(arr) = data.as_array() else { break };
+            if arr.is_empty() {
+                break;
+            }
+            for item in arr {
+                if let Some(mutee_id) = item.get("muteeId").and_then(|v| v.as_str()) {
+                    ids.push(mutee_id.to_string());
+                }
+            }
+            // 次ページの起点は RenoteMuting レコードの id。
+            until_id = arr
+                .last()
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if arr.len() < PAGE || until_id.is_none() {
+                break;
+            }
+        }
+        Ok(ids)
     }
 
     pub async fn renote_mute_user(
