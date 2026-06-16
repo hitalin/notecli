@@ -255,6 +255,9 @@ pub struct NormalizedUserDetail {
     pub is_following: bool,
     #[serde(default)]
     pub is_followed: bool,
+    /// 鍵アカウントへフォローリクエスト送信済みで未承認の状態
+    #[serde(default)]
+    pub has_pending_follow_request_from_you: bool,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -1192,6 +1195,9 @@ pub struct RawUserDetail {
     pub is_following: bool,
     #[serde(default)]
     pub is_followed: bool,
+    /// 鍵アカウントへフォローリクエスト送信済みで未承認の状態
+    #[serde(default)]
+    pub has_pending_follow_request_from_you: bool,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -1411,6 +1417,7 @@ impl RawUserDetail {
             is_cat: self.is_cat,
             is_following: self.is_following,
             is_followed: self.is_followed,
+            has_pending_follow_request_from_you: self.has_pending_follow_request_from_you,
             created_at: self.created_at,
             avatar_decorations: self.avatar_decorations,
             emojis: self.emojis,
@@ -1794,8 +1801,9 @@ mod tests {
             "notesCount": 200,
             "isBot": true,
             "isCat": true,
-            "isFollowing": true,
+            "isFollowing": false,
             "isFollowed": false,
+            "hasPendingFollowRequestFromYou": true,
             "createdAt": "2024-01-01T00:00:00.000Z",
             "avatarDecorations": [],
             "emojis": {},
@@ -1812,7 +1820,8 @@ mod tests {
         assert_eq!(detail.host.as_deref(), Some("remote.example.com"));
         assert!(detail.is_bot);
         assert!(detail.is_cat);
-        assert!(detail.is_following);
+        assert!(!detail.is_following);
+        assert!(detail.has_pending_follow_request_from_you);
         assert_eq!(detail.followers_count, 100);
         assert_eq!(detail.notes_count, 200);
         assert_eq!(detail.roles.len(), 1);
