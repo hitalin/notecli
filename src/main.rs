@@ -22,6 +22,7 @@ async fn main() {
     }
 
     let cli = Cli::parse();
+    notecli::format::init_color(cli.color);
 
     match cli.command {
         None | Some(Commands::Daemon { .. }) => {

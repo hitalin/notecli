@@ -1,5 +1,17 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+
+/// 色付け出力の制御 (exa/ls/bat 互換)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum ColorWhen {
+    /// TTY 検出と NO_COLOR/CLICOLOR_FORCE を尊重して自動判定
+    #[default]
+    Auto,
+    /// 常に色付け
+    Always,
+    /// 色を付けない
+    Never,
+}
 
 /// Metadata for a CLI subcommand (exposed to external consumers like notedeck).
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +107,10 @@ pub struct Cli {
     /// NDJSON出力、1行1JSONオブジェクト (jqストリーミング向け)
     #[arg(long, global = true, group = "output_format")]
     pub jsonl: bool,
+
+    /// 色付け出力の制御: auto, always, never
+    #[arg(long, value_enum, default_value_t = ColorWhen::Auto, global = true)]
+    pub color: ColorWhen,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -512,6 +528,18 @@ mod tests {
     fn parse_output_format_jsonl() {
         let cli = Cli::parse_from(["notecli", "--jsonl", "tl"]);
         assert!(cli.jsonl);
+    }
+
+    #[test]
+    fn parse_color_option() {
+        let cli = Cli::parse_from(["notecli", "--color", "never", "tl"]);
+        assert_eq!(cli.color, ColorWhen::Never);
+    }
+
+    #[test]
+    fn color_defaults_to_auto() {
+        let cli = Cli::parse_from(["notecli", "tl"]);
+        assert_eq!(cli.color, ColorWhen::Auto);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::api::MisskeyClient;
 use crate::db::Database;
 use crate::error::NoteDeckError;
-use crate::format::{print_action, OutputFormat};
+use crate::format::{print_action, theme, OutputFormat};
 use crate::models::{Account, AccountPublic};
 
 pub fn run_accounts(db: &Database, fmt: OutputFormat) -> Result<(), NoteDeckError> {
@@ -25,7 +25,12 @@ pub fn run_accounts(db: &Database, fmt: OutputFormat) -> Result<(), NoteDeckErro
         OutputFormat::Compact => {
             for a in &accounts {
                 let name = a.display_name.as_deref().unwrap_or(&a.username);
-                println!("{}\t@{}@{}\t{}", a.id, a.username, a.host, name);
+                println!(
+                    "{}\t{}\t{}",
+                    theme::muted(&a.id),
+                    theme::user(&format!("@{}@{}", a.username, a.host)),
+                    theme::name(name)
+                );
             }
         }
         OutputFormat::Default => {
@@ -34,7 +39,12 @@ pub fn run_accounts(db: &Database, fmt: OutputFormat) -> Result<(), NoteDeckErro
             } else {
                 for a in &accounts {
                     let name = a.display_name.as_deref().unwrap_or(&a.username);
-                    println!("@{}@{} ({}) {}", a.username, a.host, a.id, name);
+                    println!(
+                        "{} {} {}",
+                        theme::user(&format!("@{}@{}", a.username, a.host)),
+                        theme::muted(&format!("({})", a.id)),
+                        theme::name(name)
+                    );
                 }
             }
         }
@@ -90,11 +100,14 @@ pub async fn run_login(
             );
         }
         _ => {
-            println!("以下のURLをブラウザで開いて認証してください:");
+            println!(
+                "{}",
+                theme::muted("以下のURLをブラウザで開いて認証してください:")
+            );
             println!();
-            println!("  {}", auth_url);
+            println!("  {}", theme::link(&auth_url));
             println!();
-            println!("認証が完了したらEnterを押してください...");
+            println!("{}", theme::muted("認証が完了したらEnterを押してください..."));
         }
     }
 
@@ -137,15 +150,18 @@ pub async fn run_login(
         OutputFormat::Ids => println!("{}", account_id),
         OutputFormat::Compact => {
             println!(
-                "{}\t@{}@{}\t{}",
-                account_id,
-                auth.user.username,
-                host,
-                auth.user.name.as_deref().unwrap_or(&auth.user.username)
+                "{}\t{}\t{}",
+                theme::muted(&account_id),
+                theme::user(&format!("@{}@{}", auth.user.username, host)),
+                theme::name(auth.user.name.as_deref().unwrap_or(&auth.user.username))
             );
         }
         OutputFormat::Default => {
-            println!("Login successful: @{}@{}", auth.user.username, host);
+            println!(
+                "{} {}",
+                theme::success("Login successful:"),
+                theme::user(&format!("@{}@{}", auth.user.username, host))
+            );
         }
     }
 
