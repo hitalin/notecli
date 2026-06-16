@@ -1252,6 +1252,24 @@ impl MisskeyClient {
         Ok(())
     }
 
+    /// 自分が送ったフォローリクエストを取り消す (following/requests/cancel)。
+    /// 鍵アカウント宛ての未承認リクエストに使う (following/delete は notFollowing エラーになる)。
+    pub async fn cancel_follow_request(
+        &self,
+        host: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "following/requests/cancel",
+            json!({ "userId": user_id }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Fetch server meta information.
     pub async fn get_meta(&self, host: &str, token: &str) -> Result<Value, NoteDeckError> {
         self.request(host, token, "meta", json!({})).await
@@ -2884,6 +2902,23 @@ mod tests {
 
         let client = MisskeyClient::with_base_url(&server.uri());
         client.follow_user("h", "token", "u1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_follow_request_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/following/requests/cancel"))
+            .and(body_partial_json(json!({ "userId": "u1" })))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        client
+            .cancel_follow_request("h", "token", "u1")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
