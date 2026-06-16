@@ -16,9 +16,11 @@
         pkgs = nixpkgs.legacyPackages.${system};
         notecli = pkgs.rustPlatform.buildRustPackage {
           pname = "notecli";
-          version = "0.1.0";
+          version = (pkgs.lib.importTOML ./Cargo.toml).package.version;
           src = ./.;
-          cargoHash = "sha256-8nNtS9QVLxYPWx75oSvvy+7VYYq8e+B/abIbB5qF7Gc=";
+          # Cargo.lock から依存を決定的に解決する。
+          # 依存を追加してもハッシュ手動更新は不要 (cargoHash 方式の破綻を回避)。
+          cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = with pkgs; [ pkg-config ];
           buildInputs =
             with pkgs;
