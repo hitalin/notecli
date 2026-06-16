@@ -249,63 +249,37 @@ fn print_notification_compact(n: &NormalizedNotification) {
 }
 
 fn print_notification(n: &NormalizedNotification) {
-    let user = n.user.as_ref().map(format_user).unwrap_or_default();
-    let note_preview = n
+    let user = n.user.as_ref().map(format_user);
+    let reaction = if n.notification_type == "reaction" {
+        n.reaction.as_deref()
+    } else {
+        None
+    };
+    let preview = n
         .note
         .as_ref()
-        .and_then(|n| n.text.as_deref())
-        .unwrap_or("");
-    let preview = if note_preview.len() > 50 {
-        format!("{}...", &note_preview[..50])
-    } else {
-        note_preview.to_string()
-    };
-    let preview_dim = theme::muted(&format!("\"{preview}\""));
-    let user = theme::user(&user);
+        .and_then(|note| note.text.as_deref())
+        .map(|t| truncate_chars(&oneline(t), 50))
+        .filter(|p| !p.is_empty());
 
-    match n.notification_type.as_str() {
-        "reaction" => {
-            let reaction = n.reaction.as_deref().unwrap_or("?");
-            println!(
-                "{}  {}  {}  {}",
-                theme::notif_kind("reaction"),
-                user,
-                theme::badge(reaction),
-                preview_dim
-            );
-        }
-        "follow" => println!("{}    {}", theme::notif_kind("follow"), user),
-        "reply" => println!(
-            "{}     {}  {}",
-            theme::notif_kind("reply"),
-            user,
-            preview_dim
-        ),
-        "renote" => println!(
-            "{}    {}  {}",
-            theme::notif_kind("renote"),
-            user,
-            preview_dim
-        ),
-        "mention" => println!(
-            "{}   {}  {}",
-            theme::notif_kind("mention"),
-            user,
-            preview_dim
-        ),
-        "quote" => println!(
-            "{}     {}  {}",
-            theme::notif_kind("quote"),
-            user,
-            preview_dim
-        ),
-        other => println!(
-            "{}  {}  {}",
-            theme::notif_kind(&format!("{other:<10}")),
-            user,
-            preview_dim
-        ),
+    // 種別ラベルしか中身が無いシステム通知 (createToken 等) は
+    // 人間向け表示では省く (json/jsonl では全件保持される)
+    if user.is_none() && reaction.is_none() && preview.is_none() {
+        return;
     }
+
+    // 種別ラベルを固定幅で揃える (パディングは色付けの前に行う)
+    let mut line = theme::notif_kind(&format!("{:<9}", n.notification_type)).to_string();
+    if let Some(user) = user {
+        line.push_str(&format!("  {}", theme::user(&user)));
+    }
+    if let Some(reaction) = reaction {
+        line.push_str(&format!("  {}", theme::badge(reaction)));
+    }
+    if let Some(preview) = preview {
+        line.push_str(&format!("  {}", theme::muted(&format!("\"{preview}\""))));
+    }
+    println!("{line}");
 }
 
 // --- User ---
@@ -412,6 +386,17 @@ pub fn oneline(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 文字境界を尊重して先頭 max 文字に切り詰める (超過時は "..." を付与)。
+fn truncate_chars(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
+    } else {
+        head
+    }
+}
+
 fn compact_note_text(note: &NormalizedNote) -> String {
     let mut parts = Vec::new();
     if let Some(ref cw) = note.cw {
@@ -460,5 +445,19 @@ mod tests {
     #[test]
     fn color_auto_pipe_disables() {
         assert!(!resolve_color(ColorWhen::Auto, false, false, false));
+    }
+
+    #[test]
+    fn truncate_chars_respects_char_boundary() {
+        // マルチバイト文字をバイト境界で切らない (旧バグ &s[..n] の回帰防止)
+        let s = "すごく眠いというか疲れてるんだけど傾眠なのかなぁ";
+        let out = truncate_chars(s, 10);
+        assert_eq!(out, "すごく眠いというか疲...");
+        assert_eq!(out.chars().count(), 13); // 10 + "..."
+    }
+
+    #[test]
+    fn truncate_chars_keeps_short_string_intact() {
+        assert_eq!(truncate_chars("短い", 50), "短い");
     }
 }
