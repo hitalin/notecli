@@ -1225,6 +1225,28 @@ pub struct RawUserDetail {
     pub with_replies: Option<bool>,
 }
 
+/// Misskey の `mutedWords` / `hardMutedWords` の 1 要素。
+/// 文字列配列なら AND 語群（全語含むとマッチ）、文字列なら `/regex/flags` 形式の正規表現。
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(untagged)]
+pub enum MutedWord {
+    Group(Vec<String>),
+    Pattern(String),
+}
+
+/// `i`(meDetailed) から取得する word mute 設定（read のみ、#610）。
+/// soft = `mutedWords`（隠して展開可）、hard = `hardMutedWords`（完全非表示）。
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct MutedWordsResult {
+    pub muted_words: Vec<MutedWord>,
+    pub hard_muted_words: Vec<MutedWord>,
+    /// インスタンスミュート（#613）。ミュート対象ホスト名の配列。同じ `i` から取得。
+    pub muted_instances: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RawMiAuthResponse {
     pub ok: bool,

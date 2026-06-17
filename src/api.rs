@@ -10,9 +10,9 @@ use crate::error::NoteDeckError;
 use crate::models::{
     Antenna, AuthResult, Channel, ChatMessage, ChatUser, Clip, CreateNoteParams,
     NormalizedDriveFile, NormalizedNote, NormalizedNoteReaction, NormalizedNotification,
-    NormalizedUser, NormalizedUserDetail, RawCreateNoteResponse, RawDriveFile, RawEmojisResponse,
-    RawMiAuthResponse, RawNote, RawNoteReaction, RawNotification, RawUser, RawUserDetail,
-    SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
+    MutedWordsResult, NormalizedUser, NormalizedUserDetail, RawCreateNoteResponse, RawDriveFile,
+    RawEmojisResponse, RawMiAuthResponse, RawNote, RawNoteReaction, RawNotification, RawUser,
+    RawUserDetail, SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
 };
 
 /// Maximum response body size (50 MB) to prevent memory exhaustion from malicious servers.
@@ -2282,6 +2282,74 @@ impl MisskeyClient {
                 }
             }
             // 次ページの起点は Muting レコードの id（mutee の id ではない）。
+            until_id = arr
+                .last()
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if arr.len() < PAGE || until_id.is_none() {
+                break;
+            }
+        }
+        Ok(ids)
+    }
+
+    /// `i`(meDetailed) から `mutedWords` / `hardMutedWords` を取得する（read のみ、#610）。
+    /// 想定外の要素形は serde untagged で取り切れない場合があるため、欠損時は空配列にフォールバック。
+    pub async fn muted_words(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<MutedWordsResult, NoteDeckError> {
+        let data = self.request(host, token, "i", json!({})).await?;
+        let muted_words = data
+            .get("mutedWords")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let hard_muted_words = data
+            .get("hardMutedWords")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let muted_instances = data
+            .get("mutedInstances")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        Ok(MutedWordsResult {
+            muted_words,
+            hard_muted_words,
+            muted_instances,
+        })
+    }
+
+    /// renote mute 中のユーザー ID 一覧を取得する（#614: 起動時の renote mute store hydrate）。
+    /// `renote-mute/list` は RenoteMuting レコード配列を返すため muteeId を抽出する。
+    pub async fn renote_muted_user_ids(
+        &self,
+        host: &str,
+        token: &str,
+    ) -> Result<Vec<String>, NoteDeckError> {
+        const PAGE: usize = 100;
+        let mut ids = Vec::new();
+        let mut until_id: Option<String> = None;
+        loop {
+            let mut params = json!({ "limit": PAGE });
+            apply_pagination(&mut params, None, until_id.as_deref());
+            let data = self
+                .request(host, token, "renote-mute/list", params)
+                .await?;
+            let Some(arr) = data.as_array() else { break };
+            if arr.is_empty() {
+                break;
+            }
+            for item in arr {
+                if let Some(mutee_id) = item.get("muteeId").and_then(|v| v.as_str()) {
+                    ids.push(mutee_id.to_string());
+                }
+            }
+            // 次ページの起点は RenoteMuting レコードの id。
             until_id = arr
                 .last()
                 .and_then(|v| v.get("id"))
