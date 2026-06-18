@@ -1,4 +1,5 @@
 mod auth;
+mod doctor;
 mod notes;
 mod users;
 
@@ -32,6 +33,7 @@ pub async fn run_cli(
     // Commands that don't need credentials
     match cmd {
         Commands::Accounts => return auth::run_accounts(&db, fmt),
+        Commands::Doctor => return doctor::run_doctor(&db, &db_path, account_spec, fmt).await,
         Commands::Login { host } => return auth::run_login(&db, host, fmt).await,
         Commands::Logout { target } => {
             let account = resolve_account(&db, Some(target))?;
@@ -86,6 +88,7 @@ pub async fn run_cli(
         Commands::Follow { user_id } => users::run_follow(&ctx, user_id).await,
         Commands::Unfollow { user_id } => users::run_unfollow(&ctx, user_id).await,
         Commands::Accounts
+        | Commands::Doctor
         | Commands::Daemon { .. }
         | Commands::Login { .. }
         | Commands::Logout { .. } => {

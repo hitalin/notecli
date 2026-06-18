@@ -137,6 +137,19 @@ pub enum Commands {
     )]
     Accounts,
 
+    /// 環境・設定・接続の健全性を診断
+    #[command(
+        long_about = "notecli の動作に必要な前提条件を診断します。\n\
+            データベース、keychain、各アカウントの認証情報・サーバー疎通・\n\
+            トークン有効性をチェックします。\n\n\
+            -a/--account で対象アカウントを絞り込めます (省略時は全アカウント)。",
+        after_long_help = "使用例:\n\
+            \x20 notecli doctor\n\
+            \x20 notecli doctor -a @taka@misskey.io\n\
+            \x20 notecli --json doctor"
+    )]
+    Doctor,
+
     /// アカウントを登録 (MiAuth認証)
     #[command(
         long_about = "MiAuth を使って Misskey インスタンスにログインし、\n\

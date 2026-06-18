@@ -52,6 +52,9 @@ pub(crate) mod theme {
     pub fn success(s: &str) -> ColoredString {
         s.green()
     }
+    pub fn error(s: &str) -> ColoredString {
+        s.red() // 失敗・エラー
+    }
     pub fn link(s: &str) -> ColoredString {
         s.cyan()
     }
