@@ -1,5 +1,7 @@
 mod auth;
-mod doctor;
+/// Public so embedders (notedeck の healthcheck) can call [`doctor::diagnose`]
+/// to reuse the same checks the `doctor` CLI subcommand runs.
+pub mod doctor;
 mod notes;
 mod users;
 
