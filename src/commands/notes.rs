@@ -43,7 +43,7 @@ pub async fn run_post(
     Ok(())
 }
 
-pub async fn run_tl(ctx: &CmdContext, tl_type: &str, limit: i64) -> Result<(), NoteDeckError> {
+pub async fn run_timeline(ctx: &CmdContext, tl_type: &str, limit: i64) -> Result<(), NoteDeckError> {
     let notes = ctx
         .client
         .get_timeline(

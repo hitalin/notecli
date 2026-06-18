@@ -65,7 +65,7 @@ pub async fn run_cli(
         } => {
             notes::run_post(&ctx, text, cw.as_deref(), visibility, reply_to.as_deref(), *local_only).await
         }
-        Commands::Tl { r#type, limit } => notes::run_tl(&ctx, r#type, *limit).await,
+        Commands::Timeline { r#type, limit } => notes::run_timeline(&ctx, r#type, *limit).await,
         Commands::Search { query, limit } => notes::run_search(&ctx, query, *limit).await,
         Commands::Note { id } => notes::run_note(&ctx, id).await,
         Commands::Replies { id, limit } => notes::run_replies(&ctx, id, *limit).await,
