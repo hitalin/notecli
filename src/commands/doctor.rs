@@ -10,25 +10,27 @@ use crate::keychain;
 use crate::models::Account;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
-enum Status {
+pub enum Status {
     Ok,
     Warn,
     Fail,
 }
 
-#[derive(Serialize)]
-struct Check {
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct Check {
     /// チェック項目名 (database, keychain, credentials, network, auth)
-    name: String,
-    status: Status,
-    message: String,
+    pub name: String,
+    pub status: Status,
+    pub message: String,
     /// アカウント別チェックの場合の対象 (@user@host)。環境チェックは None。
     #[serde(skip_serializing_if = "Option::is_none")]
-    account: Option<String>,
+    pub account: Option<String>,
     /// 失敗・警告時にユーザーが実行すべき修復コマンド/手順。
     #[serde(skip_serializing_if = "Option::is_none")]
-    fix: Option<String>,
+    pub fix: Option<String>,
 }
 
 impl Check {
@@ -44,18 +46,21 @@ impl Check {
     }
 }
 
-#[derive(Serialize)]
-struct Report {
-    ok: bool,
-    checks: Vec<Check>,
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct Report {
+    pub ok: bool,
+    pub checks: Vec<Check>,
 }
 
-pub async fn run_doctor(
+/// 環境・アカウントの診断を実行し、結果を [`Report`] として返す。
+/// 出力やプロセス終了は行わない — CLI 表示は [`run_doctor`] が、GUI (notedeck の
+/// healthcheck) はこの [`Report`] を直接消費する。
+pub async fn diagnose(
     db: &Database,
     db_path: &Path,
     account_spec: Option<&str>,
-    fmt: OutputFormat,
-) -> Result<(), NoteDeckError> {
+) -> Result<Report, NoteDeckError> {
     let mut checks = vec![check_database(db, db_path), check_keychain()];
 
     let accounts = db.load_accounts().unwrap_or_default();
@@ -92,7 +97,16 @@ pub async fn run_doctor(
     }
 
     let ok = checks.iter().all(|c| c.status != Status::Fail);
-    let report = Report { ok, checks };
+    Ok(Report { ok, checks })
+}
+
+pub async fn run_doctor(
+    db: &Database,
+    db_path: &Path,
+    account_spec: Option<&str>,
+    fmt: OutputFormat,
+) -> Result<(), NoteDeckError> {
+    let report = diagnose(db, db_path, account_spec).await?;
     print_report(&report, fmt);
 
     // 出力は済んでいるので、fail があればここで終了コード 1 を返す
