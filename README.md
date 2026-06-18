@@ -48,7 +48,7 @@ cargo install --git https://github.com/hitalin/notecli.git
 notecli login misskey.io
 
 # 2. タイムラインを見る
-notecli tl
+notecli timeline
 
 # 3. ノートを投稿
 notecli post "Hello from notecli!"

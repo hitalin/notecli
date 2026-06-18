@@ -79,13 +79,13 @@ pub fn command_metadata() -> Vec<CliCommandInfo> {
         使用例:\n\
         \x20 notecli login misskey.io\n\
         \x20 notecli post \"Hello, world!\"\n\
-        \x20 notecli tl home -l 10\n\
+        \x20 notecli timeline home -l 10\n\
         \x20 notecli react <NOTE_ID> \":star:\"\n\n\
         Unix ツール連携:\n\
-        \x20 notecli tl -c | fzf --with-nth=2.. | cut -f1 | xargs -I{} notecli react {} :star:\n\
-        \x20 notecli tl --ids -l 5 | xargs -I{} notecli react {} :thumbsup:\n\
-        \x20 notecli tl --jsonl | jq -r 'select(.user.username == \"taka\") | .id'\n\
-        \x20 notecli tl -c -l 100 | grep \"Rust\" | cut -f1"
+        \x20 notecli timeline -c | fzf --with-nth=2.. | cut -f1 | xargs -I{} notecli react {} :star:\n\
+        \x20 notecli timeline --ids -l 5 | xargs -I{} notecli react {} :thumbsup:\n\
+        \x20 notecli timeline --jsonl | jq -r 'select(.user.username == \"taka\") | .id'\n\
+        \x20 notecli timeline -c -l 100 | grep \"Rust\" | cut -f1"
 )]
 pub struct Cli {
     /// 操作するアカウントを指定 (形式: @user@host, アカウントID, ユーザー名)
@@ -212,11 +212,11 @@ pub enum Commands {
             \x20 social - ソーシャルタイムライン（ローカル + フォロー中）\n\
             \x20 global - グローバルタイムライン（連合の全投稿）",
         after_long_help = "使用例:\n\
-            \x20 notecli tl\n\
-            \x20 notecli tl local -l 10\n\
-            \x20 notecli tl -c | fzf --with-nth=2.. | cut -f1"
+            \x20 notecli timeline\n\
+            \x20 notecli timeline local -l 10\n\
+            \x20 notecli timeline -c | fzf --with-nth=2.. | cut -f1"
     )]
-    Tl {
+    Timeline {
         /// タイムラインの種類: home, local, social, global
         #[arg(default_value = "home")]
         r#type: String,
@@ -322,7 +322,7 @@ pub enum Commands {
             \x20 notecli react 9abcdef123 \":star:\"\n\
             \x20 notecli react 9abcdef123 \"👍\"\n\n\
             バッチ:\n\
-            \x20 notecli tl --ids -l 5 | xargs -I{} notecli react {} :star:"
+            \x20 notecli timeline --ids -l 5 | xargs -I{} notecli react {} :star:"
     )]
     React {
         /// 対象ノートID
@@ -473,26 +473,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_tl_default() {
-        let cli = Cli::parse_from(["notecli", "tl"]);
+    fn parse_timeline_default() {
+        let cli = Cli::parse_from(["notecli", "timeline"]);
         match cli.command.unwrap() {
-            Commands::Tl { r#type, limit } => {
+            Commands::Timeline { r#type, limit } => {
                 assert_eq!(r#type, "home");
                 assert_eq!(limit, 20);
             }
-            _ => panic!("Expected Tl command"),
+            _ => panic!("Expected Timeline command"),
         }
     }
 
     #[test]
-    fn parse_tl_with_options() {
-        let cli = Cli::parse_from(["notecli", "tl", "local", "-l", "10"]);
+    fn parse_timeline_with_options() {
+        let cli = Cli::parse_from(["notecli", "timeline", "local", "-l", "10"]);
         match cli.command.unwrap() {
-            Commands::Tl { r#type, limit } => {
+            Commands::Timeline { r#type, limit } => {
                 assert_eq!(r#type, "local");
                 assert_eq!(limit, 10);
             }
-            _ => panic!("Expected Tl command"),
+            _ => panic!("Expected Timeline command"),
         }
     }
 
@@ -512,13 +512,13 @@ mod tests {
 
     #[test]
     fn parse_global_account_option() {
-        let cli = Cli::parse_from(["notecli", "-a", "@taka@misskey.io", "tl"]);
+        let cli = Cli::parse_from(["notecli", "-a", "@taka@misskey.io", "timeline"]);
         assert_eq!(cli.account.as_deref(), Some("@taka@misskey.io"));
     }
 
     #[test]
     fn parse_output_format_json() {
-        let cli = Cli::parse_from(["notecli", "--json", "tl"]);
+        let cli = Cli::parse_from(["notecli", "--json", "timeline"]);
         assert!(cli.json);
         assert!(!cli.compact);
         assert!(!cli.ids);
@@ -527,31 +527,31 @@ mod tests {
 
     #[test]
     fn parse_output_format_compact() {
-        let cli = Cli::parse_from(["notecli", "-c", "tl"]);
+        let cli = Cli::parse_from(["notecli", "-c", "timeline"]);
         assert!(cli.compact);
     }
 
     #[test]
     fn parse_output_format_ids() {
-        let cli = Cli::parse_from(["notecli", "--ids", "tl"]);
+        let cli = Cli::parse_from(["notecli", "--ids", "timeline"]);
         assert!(cli.ids);
     }
 
     #[test]
     fn parse_output_format_jsonl() {
-        let cli = Cli::parse_from(["notecli", "--jsonl", "tl"]);
+        let cli = Cli::parse_from(["notecli", "--jsonl", "timeline"]);
         assert!(cli.jsonl);
     }
 
     #[test]
     fn parse_color_option() {
-        let cli = Cli::parse_from(["notecli", "--color", "never", "tl"]);
+        let cli = Cli::parse_from(["notecli", "--color", "never", "timeline"]);
         assert_eq!(cli.color, ColorWhen::Never);
     }
 
     #[test]
     fn color_defaults_to_auto() {
-        let cli = Cli::parse_from(["notecli", "tl"]);
+        let cli = Cli::parse_from(["notecli", "timeline"]);
         assert_eq!(cli.color, ColorWhen::Auto);
     }
 
@@ -614,7 +614,7 @@ mod tests {
         assert!(names.contains(&"accounts"));
         assert!(names.contains(&"login"));
         assert!(names.contains(&"post"));
-        assert!(names.contains(&"tl"));
+        assert!(names.contains(&"timeline"));
         assert!(names.contains(&"search"));
         assert!(names.contains(&"react"));
         assert!(names.contains(&"user"));
