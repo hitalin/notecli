@@ -2852,6 +2852,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_notifications_parses_role_assigned() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/i/notifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "id": "notif1",
+                "createdAt": "2025-01-01T00:00:00.000Z",
+                "type": "roleAssigned",
+                "role": {
+                    "id": "role1",
+                    "name": "Active",
+                    "color": "#ff0000",
+                    "iconUrl": "https://example.com/role.png",
+                    "description": "active users",
+                    "displayOrder": 0,
+                    "isModerator": false
+                }
+            }])))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let notifs = client
+            .get_notifications("h", "token", "acc1", TimelineOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs[0].notification_type, "roleAssigned");
+        let role = notifs[0].role.as_ref().expect("role present");
+        assert_eq!(role.name, "Active");
+        assert_eq!(role.color.as_deref(), Some("#ff0000"));
+        assert_eq!(role.icon_url.as_deref(), Some("https://example.com/role.png"));
+    }
+
+    #[tokio::test]
     async fn search_notes_parses() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
