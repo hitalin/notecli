@@ -366,6 +366,9 @@ pub struct NormalizedNotification {
     /// Grouped users (for renote:grouped type)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub users: Option<Vec<NormalizedUser>>,
+    /// Assigned role (for roleAssigned type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<UserRole>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1154,6 +1157,8 @@ pub struct RawNotification {
     pub reactions: Option<Vec<RawReactionInfo>>,
     /// Grouped users (for renote:grouped type from notifications-grouped API)
     pub users: Option<Vec<RawUser>>,
+    /// Assigned role (for roleAssigned type)
+    pub role: Option<UserRole>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1508,6 +1513,7 @@ impl RawNotification {
             users: self
                 .users
                 .map(|us| us.into_iter().map(Into::into).collect()),
+            role: self.role,
         }
     }
 }
