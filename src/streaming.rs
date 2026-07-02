@@ -310,6 +310,7 @@ impl StreamingManager {
         let account_id_owned = account_id.to_string();
         let url_owned = url.clone();
         let subscriptions = self.subscriptions.clone();
+        let captured_notes = self.captured_notes.clone();
         let emitter = self.emitter.clone();
         let event_bus = self.event_bus.clone();
         let db = self.db.clone();
@@ -330,6 +331,7 @@ impl StreamingManager {
                 ws_stream,
                 cmd_rx,
                 subscriptions,
+                captured_notes,
             )
             .await;
         });
@@ -379,6 +381,12 @@ impl StreamingManager {
         // Remove all subscriptions for this account
         let mut subs = self.subscriptions.write().await;
         subs.retain(|_, info| info.account_id != account_id);
+        drop(subs);
+
+        // Note captures follow the same lifecycle as subscriptions
+        let mut captured = self.captured_notes.write().await;
+        captured.remove(account_id);
+        drop(captured);
 
         emit_or_log!(
             self.emitter,
@@ -780,7 +788,19 @@ impl StreamingManager {
     }
 
     pub async fn sub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
-        // WebSocket mode: send subNote command
+        // Record in captured_notes in BOTH modes. Without this, WebSocket-mode
+        // captures are not in any table, so the reconnect replay in
+        // run_ws_session never restores them and noteUpdated events silently
+        // stop after the first reconnect (idle watchdog, network error, ...).
+        {
+            let mut captured = self.captured_notes.write().await;
+            captured
+                .entry(account_id.to_string())
+                .or_default()
+                .insert(note_id.to_string());
+        }
+
+        // WebSocket mode: also send subNote now (polling mode reads the table)
         let conns = self.connections.lock().await;
         if let Some(handle) = conns.get(account_id) {
             return handle
@@ -790,19 +810,21 @@ impl StreamingManager {
                 })
                 .map_err(|_| NoteDeckError::ConnectionClosed);
         }
-        drop(conns);
-
-        // Polling mode: add to captured_notes set for batch polling
-        let mut captured = self.captured_notes.write().await;
-        captured
-            .entry(account_id.to_string())
-            .or_default()
-            .insert(note_id.to_string());
         Ok(())
     }
 
     pub async fn unsub_note(&self, account_id: &str, note_id: &str) -> Result<(), NoteDeckError> {
-        // WebSocket mode
+        {
+            let mut captured = self.captured_notes.write().await;
+            if let Some(set) = captured.get_mut(account_id) {
+                set.remove(note_id);
+                if set.is_empty() {
+                    captured.remove(account_id);
+                }
+            }
+        }
+
+        // WebSocket mode: also send unsubNote now
         let conns = self.connections.lock().await;
         if let Some(handle) = conns.get(account_id) {
             return handle
@@ -811,13 +833,6 @@ impl StreamingManager {
                     id: note_id.to_string(),
                 })
                 .map_err(|_| NoteDeckError::ConnectionClosed);
-        }
-        drop(conns);
-
-        // Polling mode: remove from captured_notes
-        let mut captured = self.captured_notes.write().await;
-        if let Some(set) = captured.get_mut(account_id) {
-            set.remove(note_id);
         }
         Ok(())
     }
@@ -905,6 +920,7 @@ async fn connection_task(
     initial_ws: WsStream,
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
+    captured_notes: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) {
     let mut backoff_secs: u64 = 1;
 
@@ -920,6 +936,7 @@ async fn connection_task(
         initial_ws,
         &mut cmd_rx,
         &subscriptions,
+        &captured_notes,
     )
     .await;
     if matches!(reason, WsExitReason::Shutdown) {
@@ -950,9 +967,10 @@ async fn connection_task(
                 cmd = cmd_rx.recv() => {
                     match cmd {
                         Some(WsCommand::Shutdown) | None => break true,
-                        // Subscribe/Unsubscribe: safe to drop here because the
-                        // subscriptions table is already updated by the caller.
-                        // run_ws_session will re-subscribe from that table.
+                        // Subscribe/Unsubscribe/SubNote/UnsubNote: safe to drop
+                        // here because the subscriptions and captured_notes
+                        // tables are already updated by the caller.
+                        // run_ws_session replays from those tables.
                         _ => {}
                     }
                 }
@@ -993,6 +1011,7 @@ async fn connection_task(
                     ws_stream,
                     &mut cmd_rx,
                     &subscriptions,
+                    &captured_notes,
                 )
                 .await;
 
@@ -1025,6 +1044,7 @@ async fn run_ws_session(
     ws_stream: WsStream,
     cmd_rx: &mut mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
+    captured_notes: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) -> WsExitReason {
     let (write, read) = ws_stream.split();
     let write = Arc::new(Mutex::new(write));
@@ -1053,6 +1073,32 @@ async fn run_ws_session(
         }
     }
 
+    // Replay note captures. Unlike channel subscriptions these have no
+    // server-side persistence either, so a reconnect without this replay
+    // permanently loses noteUpdated (reactions, edits) for captured notes.
+    //
+    // session_note_subs tracks what this session has already sent subNote
+    // for. Misskey refcounts subNote (it is NOT idempotent), so a queued
+    // WsCommand::SubNote that raced with this replay must not be sent twice
+    // or a single unsubNote would leave a dangling server-side subscription.
+    let session_note_subs: HashSet<String> = {
+        let captured = captured_notes.read().await;
+        captured.get(account_id).cloned().unwrap_or_default()
+    };
+
+    if !session_note_subs.is_empty() {
+        let mut w = write.lock().await;
+        for note_id in &session_note_subs {
+            let msg = json!({ "type": "subNote", "body": { "id": note_id } });
+            if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
+                tracing::warn!(error = %e, "subNote replay send failed");
+                // 送信失敗分は未購読のまま残るが、直後に接続自体が落ちて
+                // 再接続 replay でやり直すので個別追跡はしない
+                break;
+            }
+        }
+    }
+
     ws_loop(
         emitter,
         event_bus,
@@ -1065,6 +1111,7 @@ async fn run_ws_session(
         write,
         cmd_rx,
         subscriptions,
+        session_note_subs,
     )
     .await
 }
@@ -1082,6 +1129,10 @@ async fn ws_loop(
     write: WsWrite,
     cmd_rx: &mut mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
+    // このセッションで subNote 済みのノート id。replay 分を含む。
+    // Misskey の subNote は refcount 式で冪等でないため、replay と
+    // 切断中に queue された SubNote コマンドの二重送信をここで排除する。
+    mut session_note_subs: HashSet<String>,
 ) -> WsExitReason {
     let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
     ping_interval.tick().await; // skip the first immediate tick
@@ -1149,13 +1200,18 @@ async fn ws_loop(
                         }
                     }
                     Some(WsCommand::SubNote { id }) => {
-                        let msg = json!({ "type": "subNote", "body": { "id": id } });
-                        let mut w = write.lock().await;
-                        if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-                            tracing::warn!(error = %e, "subNote send failed");
+                        // insert が false = このセッションで購読済み (replay 済み
+                        // or 二重コマンド)。重複送信すると refcount が狂う。
+                        if session_note_subs.insert(id.clone()) {
+                            let msg = json!({ "type": "subNote", "body": { "id": id } });
+                            let mut w = write.lock().await;
+                            if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
+                                tracing::warn!(error = %e, "subNote send failed");
+                            }
                         }
                     }
                     Some(WsCommand::UnsubNote { id }) => {
+                        session_note_subs.remove(&id);
                         let msg = json!({ "type": "unsubNote", "body": { "id": id } });
                         let mut w = write.lock().await;
                         if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
