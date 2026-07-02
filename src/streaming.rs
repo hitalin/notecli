@@ -1076,20 +1076,24 @@ async fn run_ws_session(
     // Replay note captures. Unlike channel subscriptions these have no
     // server-side persistence either, so a reconnect without this replay
     // permanently loses noteUpdated (reactions, edits) for captured notes.
-    let to_recapture: Vec<String> = {
+    //
+    // session_note_subs tracks what this session has already sent subNote
+    // for. Misskey refcounts subNote (it is NOT idempotent), so a queued
+    // WsCommand::SubNote that raced with this replay must not be sent twice
+    // or a single unsubNote would leave a dangling server-side subscription.
+    let session_note_subs: HashSet<String> = {
         let captured = captured_notes.read().await;
-        captured
-            .get(account_id)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default()
+        captured.get(account_id).cloned().unwrap_or_default()
     };
 
-    if !to_recapture.is_empty() {
+    if !session_note_subs.is_empty() {
         let mut w = write.lock().await;
-        for note_id in &to_recapture {
+        for note_id in &session_note_subs {
             let msg = json!({ "type": "subNote", "body": { "id": note_id } });
             if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
                 tracing::warn!(error = %e, "subNote replay send failed");
+                // 送信失敗分は未購読のまま残るが、直後に接続自体が落ちて
+                // 再接続 replay でやり直すので個別追跡はしない
                 break;
             }
         }
@@ -1107,6 +1111,7 @@ async fn run_ws_session(
         write,
         cmd_rx,
         subscriptions,
+        session_note_subs,
     )
     .await
 }
@@ -1124,6 +1129,10 @@ async fn ws_loop(
     write: WsWrite,
     cmd_rx: &mut mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: &Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
+    // このセッションで subNote 済みのノート id。replay 分を含む。
+    // Misskey の subNote は refcount 式で冪等でないため、replay と
+    // 切断中に queue された SubNote コマンドの二重送信をここで排除する。
+    mut session_note_subs: HashSet<String>,
 ) -> WsExitReason {
     let mut ping_interval = tokio::time::interval(WS_PING_INTERVAL);
     ping_interval.tick().await; // skip the first immediate tick
@@ -1191,13 +1200,18 @@ async fn ws_loop(
                         }
                     }
                     Some(WsCommand::SubNote { id }) => {
-                        let msg = json!({ "type": "subNote", "body": { "id": id } });
-                        let mut w = write.lock().await;
-                        if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
-                            tracing::warn!(error = %e, "subNote send failed");
+                        // insert が false = このセッションで購読済み (replay 済み
+                        // or 二重コマンド)。重複送信すると refcount が狂う。
+                        if session_note_subs.insert(id.clone()) {
+                            let msg = json!({ "type": "subNote", "body": { "id": id } });
+                            let mut w = write.lock().await;
+                            if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
+                                tracing::warn!(error = %e, "subNote send failed");
+                            }
                         }
                     }
                     Some(WsCommand::UnsubNote { id }) => {
+                        session_note_subs.remove(&id);
                         let msg = json!({ "type": "unsubNote", "body": { "id": id } });
                         let mut w = write.lock().await;
                         if let Err(e) = w.send(Message::Text(msg.to_string().into())).await {
