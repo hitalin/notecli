@@ -221,6 +221,9 @@ struct ConnectionHandle {
     cmd_tx: mpsc::UnboundedSender<WsCommand>,
     task: tokio::task::JoinHandle<()>,
     host: String,
+    /// connection_task が維持する実際の接続状態。connect() の冪等 return 時に
+    /// 現在状態を emit するために持つ (フロントは status イベントだけを信じる)。
+    connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Handle for a polling task (non-WebSocket mode).
@@ -290,7 +293,24 @@ impl StreamingManager {
         token: &str,
     ) -> Result<(), NoteDeckError> {
         let mut conns = self.connections.lock().await;
-        if conns.contains_key(account_id) {
+        if let Some(handle) = conns.get(account_id) {
+            // 冪等 return でも現在の実状態を emit する。フロントは復帰時に
+            // リスナーを張り直してから connect を呼び直すため、背景化中に
+            // 取り逃した状態遷移をここで補正できる (楽観的に connected と
+            // 見なす JS 側ロジックを置かないための供給側の責務)。
+            let state = if handle.connected.load(std::sync::atomic::Ordering::Relaxed) {
+                "connected"
+            } else {
+                "reconnecting"
+            };
+            emit_or_log!(
+                self.emitter,
+                "stream-status",
+                StreamStatusEvent {
+                    account_id: account_id.to_string(),
+                    state: state.to_string(),
+                }
+            );
             return Ok(());
         }
 
@@ -319,6 +339,7 @@ impl StreamingManager {
             }
         };
         let connected = initial_ws.is_some();
+        let connected_flag = Arc::new(std::sync::atomic::AtomicBool::new(connected));
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
@@ -333,6 +354,7 @@ impl StreamingManager {
         let api_client = self.api_client.clone();
         let host_owned = host.to_string();
         let token_owned = token.to_string();
+        let connected_flag_task = connected_flag.clone();
         let task = tokio::spawn(async move {
             connection_task(
                 emitter,
@@ -347,6 +369,7 @@ impl StreamingManager {
                 cmd_rx,
                 subscriptions,
                 captured_notes,
+                connected_flag_task,
             )
             .await;
         });
@@ -357,6 +380,7 @@ impl StreamingManager {
                 cmd_tx,
                 task,
                 host: host.to_string(),
+                connected: connected_flag,
             },
         );
 
@@ -936,7 +960,10 @@ async fn connection_task(
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
     captured_notes: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    connected_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use std::sync::atomic::Ordering;
+
     let mut backoff_secs: u64 = 1;
 
     // Run the first session with the already-connected WebSocket.
@@ -957,6 +984,7 @@ async fn connection_task(
             &captured_notes,
         )
         .await;
+        connected_flag.store(false, Ordering::Relaxed);
         if matches!(reason, WsExitReason::Shutdown) {
             return;
         }
@@ -964,6 +992,7 @@ async fn connection_task(
 
     // Reconnection loop
     loop {
+        connected_flag.store(false, Ordering::Relaxed);
         emit_or_log!(
             emitter,
             "stream-status",
@@ -1009,6 +1038,7 @@ async fn connection_task(
         match ws_result {
             Ok(Ok((ws_stream, _))) => {
                 backoff_secs = 1; // Reset backoff on success
+                connected_flag.store(true, Ordering::Relaxed);
 
                 emit_or_log!(
                     emitter,
@@ -1033,6 +1063,7 @@ async fn connection_task(
                     &captured_notes,
                 )
                 .await;
+                connected_flag.store(false, Ordering::Relaxed);
 
                 if matches!(reason, WsExitReason::Shutdown) {
                     return;
