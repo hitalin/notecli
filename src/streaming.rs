@@ -296,14 +296,29 @@ impl StreamingManager {
 
         let url = format!("wss://{host}/streaming?i={token}");
 
-        // Verify initial connection (with timeout to prevent hang DoS)
-        let (ws_stream, _) = tokio::time::timeout(
+        // Attempt the initial connection (with timeout to prevent hang DoS).
+        // 失敗しても Err を返さず connection_task の再接続ループに委ねる:
+        // 初回失敗を呼び出し側へ返すだけだと再試行の責務が宙に浮き、
+        // 「起動直後のネットワーク未確立 = 永久にストリームなし」になる。
+        // 接続の生死は stream-status イベント (connected / reconnecting) で
+        // フロントへ伝わる。
+        let initial_ws = match tokio::time::timeout(
             WS_CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async_with_config(&url, Some(ws_config()), false),
         )
         .await
-        .map_err(|_| NoteDeckError::WebSocket("Connection timeout".to_string()))?
-        .map_err(|e| NoteDeckError::WebSocket(e.to_string()))?;
+        {
+            Ok(Ok((ws_stream, _))) => Some(ws_stream),
+            Ok(Err(e)) => {
+                tracing::warn!(account_id, error = %e, "initial connect failed; retrying in background");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(account_id, "initial connect timed out; retrying in background");
+                None
+            }
+        };
+        let connected = initial_ws.is_some();
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
@@ -328,7 +343,7 @@ impl StreamingManager {
                 host_owned,
                 token_owned,
                 url_owned,
-                ws_stream,
+                initial_ws,
                 cmd_rx,
                 subscriptions,
                 captured_notes,
@@ -350,7 +365,7 @@ impl StreamingManager {
             "stream-status",
             StreamStatusEvent {
                 account_id: account_id.to_string(),
-                state: "connected".to_string(),
+                state: if connected { "connected" } else { "reconnecting" }.to_string(),
             }
         );
 
@@ -917,30 +932,34 @@ async fn connection_task(
     host: String,
     token: String,
     url: String,
-    initial_ws: WsStream,
+    initial_ws: Option<WsStream>,
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
     captured_notes: Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) {
     let mut backoff_secs: u64 = 1;
 
-    // Run the first session with the already-connected WebSocket
-    let reason = run_ws_session(
-        &emitter,
-        &event_bus,
-        &db,
-        &api_client,
-        &account_id,
-        &host,
-        &token,
-        initial_ws,
-        &mut cmd_rx,
-        &subscriptions,
-        &captured_notes,
-    )
-    .await;
-    if matches!(reason, WsExitReason::Shutdown) {
-        return;
+    // Run the first session with the already-connected WebSocket.
+    // None = 初回接続に失敗している (connect() が委譲してきた)。
+    // その場合は最初から下の再接続ループに任せる。
+    if let Some(initial_ws) = initial_ws {
+        let reason = run_ws_session(
+            &emitter,
+            &event_bus,
+            &db,
+            &api_client,
+            &account_id,
+            &host,
+            &token,
+            initial_ws,
+            &mut cmd_rx,
+            &subscriptions,
+            &captured_notes,
+        )
+        .await;
+        if matches!(reason, WsExitReason::Shutdown) {
+            return;
+        }
     }
 
     // Reconnection loop
@@ -1799,5 +1818,31 @@ mod tests {
         // connection (only kept alive by ping/pong) would be falsely torn down.
         // 3x gives margin for two consecutive lost pongs.
         assert!(WS_READ_IDLE_TIMEOUT >= WS_PING_INTERVAL * 3);
+    }
+
+    #[tokio::test]
+    async fn connect_failure_hands_off_to_reconnect_loop() {
+        // 初回接続に失敗しても Err にせず、再接続ループ入りのハンドルを
+        // 残すこと。旧実装は Err を返して再試行の責務が宙に浮き、
+        // 「起動直後のネットワーク未確立 = 永久にストリームなし」だった。
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Database::open(&dir.path().join("test.db")).unwrap());
+        let manager = StreamingManager::new(
+            Arc::new(NoopEmitter),
+            Arc::new(EventBus::new()),
+            db,
+        );
+
+        // 127.0.0.1:1 は即 connection refused になる
+        manager
+            .connect("acc-1", "127.0.0.1:1", "token")
+            .await
+            .expect("connect must not error on initial failure");
+
+        // ハンドルが生きていてコマンドを受け付ける (= ループが存在する)
+        manager.sub_note("acc-1", "note-1").await.unwrap();
+
+        // disconnect が backoff 中の Shutdown を届けて task を終了できる
+        manager.disconnect("acc-1").await;
     }
 }
