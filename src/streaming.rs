@@ -221,6 +221,9 @@ struct ConnectionHandle {
     cmd_tx: mpsc::UnboundedSender<WsCommand>,
     task: tokio::task::JoinHandle<()>,
     host: String,
+    /// connection_task が維持する実際の接続状態。connect() の冪等 return 時に
+    /// 現在状態を emit するために持つ (フロントは status イベントだけを信じる)。
+    connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Handle for a polling task (non-WebSocket mode).
@@ -290,20 +293,53 @@ impl StreamingManager {
         token: &str,
     ) -> Result<(), NoteDeckError> {
         let mut conns = self.connections.lock().await;
-        if conns.contains_key(account_id) {
+        if let Some(handle) = conns.get(account_id) {
+            // 冪等 return でも現在の実状態を emit する。フロントは復帰時に
+            // リスナーを張り直してから connect を呼び直すため、背景化中に
+            // 取り逃した状態遷移をここで補正できる (楽観的に connected と
+            // 見なす JS 側ロジックを置かないための供給側の責務)。
+            let state = if handle.connected.load(std::sync::atomic::Ordering::Relaxed) {
+                "connected"
+            } else {
+                "reconnecting"
+            };
+            emit_or_log!(
+                self.emitter,
+                "stream-status",
+                StreamStatusEvent {
+                    account_id: account_id.to_string(),
+                    state: state.to_string(),
+                }
+            );
             return Ok(());
         }
 
         let url = format!("wss://{host}/streaming?i={token}");
 
-        // Verify initial connection (with timeout to prevent hang DoS)
-        let (ws_stream, _) = tokio::time::timeout(
+        // Attempt the initial connection (with timeout to prevent hang DoS).
+        // 失敗しても Err を返さず connection_task の再接続ループに委ねる:
+        // 初回失敗を呼び出し側へ返すだけだと再試行の責務が宙に浮き、
+        // 「起動直後のネットワーク未確立 = 永久にストリームなし」になる。
+        // 接続の生死は stream-status イベント (connected / reconnecting) で
+        // フロントへ伝わる。
+        let initial_ws = match tokio::time::timeout(
             WS_CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async_with_config(&url, Some(ws_config()), false),
         )
         .await
-        .map_err(|_| NoteDeckError::WebSocket("Connection timeout".to_string()))?
-        .map_err(|e| NoteDeckError::WebSocket(e.to_string()))?;
+        {
+            Ok(Ok((ws_stream, _))) => Some(ws_stream),
+            Ok(Err(e)) => {
+                tracing::warn!(account_id, error = %e, "initial connect failed; retrying in background");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(account_id, "initial connect timed out; retrying in background");
+                None
+            }
+        };
+        let connected = initial_ws.is_some();
+        let connected_flag = Arc::new(std::sync::atomic::AtomicBool::new(connected));
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
@@ -318,6 +354,7 @@ impl StreamingManager {
         let api_client = self.api_client.clone();
         let host_owned = host.to_string();
         let token_owned = token.to_string();
+        let connected_flag_task = connected_flag.clone();
         let task = tokio::spawn(async move {
             connection_task(
                 emitter,
@@ -328,10 +365,11 @@ impl StreamingManager {
                 host_owned,
                 token_owned,
                 url_owned,
-                ws_stream,
+                initial_ws,
                 cmd_rx,
                 subscriptions,
                 captured_notes,
+                connected_flag_task,
             )
             .await;
         });
@@ -342,6 +380,7 @@ impl StreamingManager {
                 cmd_tx,
                 task,
                 host: host.to_string(),
+                connected: connected_flag,
             },
         );
 
@@ -350,7 +389,7 @@ impl StreamingManager {
             "stream-status",
             StreamStatusEvent {
                 account_id: account_id.to_string(),
-                state: "connected".to_string(),
+                state: if connected { "connected" } else { "reconnecting" }.to_string(),
             }
         );
 
@@ -917,34 +956,43 @@ async fn connection_task(
     host: String,
     token: String,
     url: String,
-    initial_ws: WsStream,
+    initial_ws: Option<WsStream>,
     mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
     subscriptions: Arc<RwLock<HashMap<String, SubscriptionInfo>>>,
     captured_notes: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    connected_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use std::sync::atomic::Ordering;
+
     let mut backoff_secs: u64 = 1;
 
-    // Run the first session with the already-connected WebSocket
-    let reason = run_ws_session(
-        &emitter,
-        &event_bus,
-        &db,
-        &api_client,
-        &account_id,
-        &host,
-        &token,
-        initial_ws,
-        &mut cmd_rx,
-        &subscriptions,
-        &captured_notes,
-    )
-    .await;
-    if matches!(reason, WsExitReason::Shutdown) {
-        return;
+    // Run the first session with the already-connected WebSocket.
+    // None = 初回接続に失敗している (connect() が委譲してきた)。
+    // その場合は最初から下の再接続ループに任せる。
+    if let Some(initial_ws) = initial_ws {
+        let reason = run_ws_session(
+            &emitter,
+            &event_bus,
+            &db,
+            &api_client,
+            &account_id,
+            &host,
+            &token,
+            initial_ws,
+            &mut cmd_rx,
+            &subscriptions,
+            &captured_notes,
+        )
+        .await;
+        connected_flag.store(false, Ordering::Relaxed);
+        if matches!(reason, WsExitReason::Shutdown) {
+            return;
+        }
     }
 
     // Reconnection loop
     loop {
+        connected_flag.store(false, Ordering::Relaxed);
         emit_or_log!(
             emitter,
             "stream-status",
@@ -990,6 +1038,7 @@ async fn connection_task(
         match ws_result {
             Ok(Ok((ws_stream, _))) => {
                 backoff_secs = 1; // Reset backoff on success
+                connected_flag.store(true, Ordering::Relaxed);
 
                 emit_or_log!(
                     emitter,
@@ -1014,6 +1063,7 @@ async fn connection_task(
                     &captured_notes,
                 )
                 .await;
+                connected_flag.store(false, Ordering::Relaxed);
 
                 if matches!(reason, WsExitReason::Shutdown) {
                     return;
@@ -1799,5 +1849,54 @@ mod tests {
         // connection (only kept alive by ping/pong) would be falsely torn down.
         // 3x gives margin for two consecutive lost pongs.
         assert!(WS_READ_IDLE_TIMEOUT >= WS_PING_INTERVAL * 3);
+    }
+
+    /// stream-status イベントを channel に流すテスト用 emitter。
+    struct ChannelEmitter(mpsc::UnboundedSender<(String, Value)>);
+
+    impl FrontendEmitter for ChannelEmitter {
+        fn emit(&self, event: &str, payload: Value) {
+            let _ = self.0.send((event.to_string(), payload));
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_failure_hands_off_to_reconnect_loop() {
+        // 初回接続に失敗しても Err にせず、再接続ループ入りのハンドルを
+        // 残すこと。旧実装は Err を返して再試行の責務が宙に浮き、
+        // 「起動直後のネットワーク未確立 = 永久にストリームなし」だった。
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Database::open(&dir.path().join("test.db")).unwrap());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let manager = StreamingManager::new(
+            Arc::new(ChannelEmitter(tx)),
+            Arc::new(EventBus::new()),
+            db,
+        );
+
+        // 127.0.0.1:1 は即 connection refused になる
+        manager
+            .connect("acc-1", "127.0.0.1:1", "token")
+            .await
+            .expect("connect must not error on initial failure");
+
+        // "reconnecting" を 2 回観測する: 1 回目は connect() 自身の emit、
+        // 2 回目は connection_task の再接続ループ冒頭の emit。2 回目が
+        // 来ること = ループが実際に生きて再試行していることの証明で、
+        // 「ループに入らず return する」ミューテーションはここで落ちる
+        // (ミューテーション注入で FAILED になることを確認済み)。
+        let mut reconnecting_count = 0;
+        while reconnecting_count < 2 {
+            let (event, payload) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("timed out waiting for reconnect loop to emit stream-status")
+                .expect("emitter channel closed before loop emitted");
+            if event == "stream-status" && payload["state"] == "reconnecting" {
+                reconnecting_count += 1;
+            }
+        }
+
+        // disconnect が backoff 中の Shutdown を届けて task を終了できる
+        manager.disconnect("acc-1").await;
     }
 }
