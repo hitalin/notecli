@@ -1820,6 +1820,15 @@ mod tests {
         assert!(WS_READ_IDLE_TIMEOUT >= WS_PING_INTERVAL * 3);
     }
 
+    /// stream-status イベントを channel に流すテスト用 emitter。
+    struct ChannelEmitter(mpsc::UnboundedSender<(String, Value)>);
+
+    impl FrontendEmitter for ChannelEmitter {
+        fn emit(&self, event: &str, payload: Value) {
+            let _ = self.0.send((event.to_string(), payload));
+        }
+    }
+
     #[tokio::test]
     async fn connect_failure_hands_off_to_reconnect_loop() {
         // 初回接続に失敗しても Err にせず、再接続ループ入りのハンドルを
@@ -1827,8 +1836,9 @@ mod tests {
         // 「起動直後のネットワーク未確立 = 永久にストリームなし」だった。
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(crate::db::Database::open(&dir.path().join("test.db")).unwrap());
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let manager = StreamingManager::new(
-            Arc::new(NoopEmitter),
+            Arc::new(ChannelEmitter(tx)),
             Arc::new(EventBus::new()),
             db,
         );
@@ -1839,8 +1849,21 @@ mod tests {
             .await
             .expect("connect must not error on initial failure");
 
-        // ハンドルが生きていてコマンドを受け付ける (= ループが存在する)
-        manager.sub_note("acc-1", "note-1").await.unwrap();
+        // "reconnecting" を 2 回観測する: 1 回目は connect() 自身の emit、
+        // 2 回目は connection_task の再接続ループ冒頭の emit。2 回目が
+        // 来ること = ループが実際に生きて再試行していることの証明で、
+        // 「ループに入らず return する」ミューテーションはここで落ちる
+        // (ミューテーション注入で FAILED になることを確認済み)。
+        let mut reconnecting_count = 0;
+        while reconnecting_count < 2 {
+            let (event, payload) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("timed out waiting for reconnect loop to emit stream-status")
+                .expect("emitter channel closed before loop emitted");
+            if event == "stream-status" && payload["state"] == "reconnecting" {
+                reconnecting_count += 1;
+            }
+        }
 
         // disconnect が backoff 中の Shutdown を届けて task を終了できる
         manager.disconnect("acc-1").await;
