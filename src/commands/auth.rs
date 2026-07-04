@@ -88,8 +88,9 @@ pub async fn run_login(
         "write:votes",
     ];
     let permission_str = permissions.join(",");
+    let scheme = crate::insecure::http_scheme(host);
     let auth_url = format!(
-        "https://{host}/miauth/{session_id}?name=notecli&permission={permission_str}"
+        "{scheme}://{host}/miauth/{session_id}?name=notecli&permission={permission_str}"
     );
 
     match fmt {
