@@ -74,7 +74,8 @@ impl MisskeyClient {
         if let Some(ref base) = self.base_url {
             return format!("{base}/api/{endpoint}");
         }
-        format!("https://{host}/api/{endpoint}")
+        let scheme = crate::insecure::http_scheme(host);
+        format!("{scheme}://{host}/api/{endpoint}")
     }
 
     /// Read the response body with a streaming size limit to prevent DoS.
@@ -2126,7 +2127,8 @@ impl MisskeyClient {
     /// Fetch nodeinfo via .well-known/nodeinfo.
     /// Returns the parsed nodeinfo JSON.
     pub async fn fetch_nodeinfo(&self, host: &str) -> Result<Value, NoteDeckError> {
-        let well_known_url = format!("https://{host}/.well-known/nodeinfo");
+        let scheme = crate::insecure::http_scheme(host);
+        let well_known_url = format!("{scheme}://{host}/.well-known/nodeinfo");
         let res = self
             .client
             .get(&well_known_url)
@@ -2162,7 +2164,7 @@ impl MisskeyClient {
             })?;
 
         // Validate URL to prevent SSRF: must be https://{host}/...
-        let expected_prefix = format!("https://{host}/");
+        let expected_prefix = format!("{scheme}://{host}/");
         if !nodeinfo_url.starts_with(&expected_prefix) {
             return Err(NoteDeckError::Api {
                 endpoint: ".well-known/nodeinfo".to_string(),
