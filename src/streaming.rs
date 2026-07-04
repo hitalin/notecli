@@ -314,7 +314,7 @@ impl StreamingManager {
             return Ok(());
         }
 
-        let scheme = crate::insecure::ws_scheme(&host);
+        let scheme = crate::insecure::ws_scheme(host);
         let url = format!("{scheme}://{host}/streaming?i={token}");
 
         // Attempt the initial connection (with timeout to prevent hang DoS).
