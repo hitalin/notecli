@@ -294,6 +294,13 @@ pub struct NormalizedUserDetail {
     /// フォロー中のみ意味を持つ: TL に他者への返信を含めるか
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_replies: Option<bool>,
+    /// users/show 応答に同梱されるピン留めノート ID (notedeck#632)
+    #[serde(default)]
+    pub pinned_note_ids: Vec<String>,
+    /// users/show 応答に同梱されるピン留めノート本体。追加の users/show +
+    /// notes/show × N を往復せずプロフィールを 1 リクエストで描ける (notedeck#632)
+    #[serde(default)]
+    pub pinned_notes: Vec<NormalizedNote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1234,6 +1241,10 @@ pub struct RawUserDetail {
     pub notify: Option<String>,
     #[serde(default)]
     pub with_replies: Option<bool>,
+    #[serde(default)]
+    pub pinned_note_ids: Vec<String>,
+    #[serde(default)]
+    pub pinned_notes: Vec<RawNote>,
 }
 
 /// Misskey の `mutedWords` / `hardMutedWords` の 1 要素。
@@ -1434,7 +1445,7 @@ impl From<RawDriveFile> for NormalizedDriveFile {
 }
 
 impl RawUserDetail {
-    pub fn normalize(self) -> NormalizedUserDetail {
+    pub fn normalize(self, account_id: &str, server_host: &str) -> NormalizedUserDetail {
         NormalizedUserDetail {
             id: self.id,
             username: self.username,
@@ -1485,6 +1496,12 @@ impl RawUserDetail {
             memo: self.memo,
             notify: self.notify,
             with_replies: self.with_replies,
+            pinned_note_ids: self.pinned_note_ids,
+            pinned_notes: self
+                .pinned_notes
+                .into_iter()
+                .map(|n| n.normalize(account_id, server_host))
+                .collect(),
         }
     }
 }
@@ -1851,7 +1868,7 @@ mod tests {
             "onlineStatus": "online"
         });
         let raw: RawUserDetail = serde_json::from_value(j).unwrap();
-        let detail = raw.normalize();
+        let detail = raw.normalize("acc1", "h");
         assert_eq!(detail.id, "u1");
         assert_eq!(detail.host.as_deref(), Some("remote.example.com"));
         assert!(detail.is_bot);

@@ -90,10 +90,10 @@ async fn resolve_and_get_user(
             .await?;
         return ctx
             .client
-            .get_user_detail(&ctx.host, &ctx.token, &user.id)
+            .get_user_detail(&ctx.host, &ctx.token, &ctx.account.id, &user.id)
             .await;
     }
     ctx.client
-        .get_user_detail(&ctx.host, &ctx.token, target)
+        .get_user_detail(&ctx.host, &ctx.token, &ctx.account.id, target)
         .await
 }

@@ -702,7 +702,7 @@ async fn get_user(
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
     let user = state
         .client
-        .get_user_detail(&h, &token, &user_id)
+        .get_user_detail(&h, &token, &account_id, &user_id)
         .await?;
     Ok(Json(user))
 }

@@ -758,13 +758,14 @@ impl MisskeyClient {
         &self,
         host: &str,
         token: &str,
+        account_id: &str,
         user_id: &str,
     ) -> Result<NormalizedUserDetail, NoteDeckError> {
         let data = self
             .request(host, token, "users/show", json!({ "userId": user_id }))
             .await?;
         let raw: RawUserDetail = serde_json::from_value(data)?;
-        Ok(raw.normalize())
+        Ok(raw.normalize(account_id, host))
     }
 
     pub async fn get_server_emojis(
@@ -2931,7 +2932,10 @@ mod tests {
             .await;
 
         let client = MisskeyClient::with_base_url(&server.uri());
-        let user = client.get_user_detail("h", "token", "u1").await.unwrap();
+        let user = client
+            .get_user_detail("h", "token", "acc1", "u1")
+            .await
+            .unwrap();
         assert_eq!(user.username, "taka");
         assert_eq!(user.followers_count, 10);
         assert_eq!(user.notes_count, 100);
@@ -3718,9 +3722,68 @@ mod tests {
             .await;
 
         let client = MisskeyClient::with_base_url(&server.uri());
-        let user = client.get_user_detail("h", "token", "u1").await.unwrap();
+        let user = client
+            .get_user_detail("h", "token", "acc1", "u1")
+            .await
+            .unwrap();
         assert_eq!(user.memo.as_deref(), Some("my note"));
         assert_eq!(user.notify.as_deref(), Some("normal"));
         assert_eq!(user.with_replies, Some(true));
+    }
+
+    /// users/show 応答に同梱される pinnedNoteIds / pinnedNotes を normalize する
+    /// (notedeck#632: プロフィール表示を追加往復なしの 1 リクエストで完結させる)。
+    #[tokio::test]
+    async fn get_user_detail_normalizes_pinned_notes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "u1",
+                "username": "taka",
+                "createdAt": "2024-01-01T00:00:00.000Z",
+                "pinnedNoteIds": ["n1", "n2"],
+                "pinnedNotes": [
+                    raw_note_json("n1", "pinned one"),
+                    raw_note_json("n2", "pinned two"),
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let user = client
+            .get_user_detail("h", "token", "acc1", "u1")
+            .await
+            .unwrap();
+        assert_eq!(user.pinned_note_ids, vec!["n1", "n2"]);
+        assert_eq!(user.pinned_notes.len(), 2);
+        assert_eq!(user.pinned_notes[0].text.as_deref(), Some("pinned one"));
+        // ピン留めノートも他経路の note と同じく account/server が刻印される
+        assert_eq!(user.pinned_notes[0].account_id, "acc1");
+        assert_eq!(user.pinned_notes[0].server_host, "h");
+    }
+
+    /// pinnedNotes を返さない (古い/フォーク) サーバーでも空配列に落ちる
+    #[tokio::test]
+    async fn get_user_detail_defaults_pinned_notes_to_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/users/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "u1",
+                "username": "taka",
+                "createdAt": "2024-01-01T00:00:00.000Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = MisskeyClient::with_base_url(&server.uri());
+        let user = client
+            .get_user_detail("h", "token", "acc1", "u1")
+            .await
+            .unwrap();
+        assert!(user.pinned_note_ids.is_empty());
+        assert!(user.pinned_notes.is_empty());
     }
 }
