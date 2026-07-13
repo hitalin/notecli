@@ -338,6 +338,15 @@ pub struct NormalizedDriveFile {
     pub size: i64,
     #[serde(default)]
     pub is_sensitive: bool,
+    /// 画像の幅 (px)。フロントの aspect-ratio 予約 (レイアウトシフト防止) 用
+    #[serde(default)]
+    pub width: Option<i64>,
+    /// 画像の高さ (px)
+    #[serde(default)]
+    pub height: Option<i64>,
+    /// blurhash プレースホルダ文字列
+    #[serde(default)]
+    pub blurhash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1139,6 +1148,19 @@ pub struct RawDriveFile {
     pub size: i64,
     #[serde(default)]
     pub is_sensitive: bool,
+    #[serde(default)]
+    pub properties: Option<RawDriveFileProperties>,
+    #[serde(default)]
+    pub blurhash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawDriveFileProperties {
+    #[serde(default)]
+    pub width: Option<i64>,
+    #[serde(default)]
+    pub height: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1440,6 +1462,9 @@ impl From<RawDriveFile> for NormalizedDriveFile {
             thumbnail_url: file.thumbnail_url,
             size: file.size,
             is_sensitive: file.is_sensitive,
+            width: file.properties.as_ref().and_then(|p| p.width),
+            height: file.properties.as_ref().and_then(|p| p.height),
+            blurhash: file.blurhash,
         }
     }
 }
@@ -1946,11 +1971,19 @@ mod tests {
             thumbnail_url: None,
             size: 0,
             is_sensitive: false,
+            properties: Some(RawDriveFileProperties {
+                width: Some(800),
+                height: Some(600),
+            }),
+            blurhash: Some("LEHV6nWB2yk8pyo0adR*.7kCMdnj".into()),
         };
         let file: NormalizedDriveFile = raw.into();
         assert_eq!(file.id, "f1");
         assert_eq!(file.file_type, "image/png");
         assert!(file.thumbnail_url.is_none());
+        assert_eq!(file.width, Some(800));
+        assert_eq!(file.height, Some(600));
+        assert!(file.blurhash.is_some());
     }
 
     #[test]
