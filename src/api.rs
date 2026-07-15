@@ -1525,6 +1525,21 @@ impl MisskeyClient {
         .await
     }
 
+    pub async fn get_sent_follow_requests(
+        &self,
+        host: &str,
+        token: &str,
+        limit: i64,
+    ) -> Result<Value, NoteDeckError> {
+        self.request(
+            host,
+            token,
+            "following/requests/sent",
+            json!({ "limit": limit }),
+        )
+        .await
+    }
+
     // --- Explore (users/roles) ---
 
     pub async fn search_users(
