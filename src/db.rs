@@ -417,6 +417,7 @@ impl Database {
                 "INSERT INTO notes_cache (note_id, account_id, server_host, created_at, text, note_json, cached_at, timeline_type, uri)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(note_id, account_id) DO UPDATE SET
+                     text = excluded.text,
                      note_json = excluded.note_json,
                      cached_at = excluded.cached_at,
                      timeline_type = excluded.timeline_type,
@@ -1549,6 +1550,39 @@ mod tests {
         let results = db.search_cached_notes("acc-1", "Rust", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "n1");
+    }
+
+    #[test]
+    fn fts_search_reflects_note_edit() {
+        let (_dir, db) = temp_db();
+        db.cache_notes(&[sample_note("n1", "before edit text")], "home")
+            .unwrap();
+
+        // 同じノートが編集後のテキストで再キャッシュされる（Misskey のノート編集）
+        db.cache_notes(&[sample_note("n1", "after edit text")], "home")
+            .unwrap();
+
+        let hit_new = db.search_cached_notes("acc-1", "after", 10).unwrap();
+        assert_eq!(hit_new.len(), 1, "編集後テキストで検索できること");
+        assert_eq!(hit_new[0].id, "n1");
+
+        let hit_old = db.search_cached_notes("acc-1", "before", 10).unwrap();
+        assert!(hit_old.is_empty(), "編集前テキストの索引が残らないこと");
+    }
+
+    #[test]
+    fn fts_search_reflects_edit_from_null_text() {
+        let (_dir, db) = temp_db();
+        // text が null のノート（renote 等）が後からテキスト付きで再キャッシュされる
+        let mut no_text = sample_note("n1", "");
+        no_text.text = None;
+        db.cache_notes(&[no_text], "home").unwrap();
+
+        db.cache_notes(&[sample_note("n1", "now has text")], "home")
+            .unwrap();
+
+        let results = db.search_cached_notes("acc-1", "now has", 10).unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[test]
