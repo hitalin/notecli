@@ -14,7 +14,7 @@ where
 
 // --- DB models ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -26,6 +26,22 @@ pub struct Account {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub software: String,
+}
+
+// token をログ・panic メッセージに漏らさないため Debug は手書き
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account")
+            .field("id", &self.id)
+            .field("host", &self.host)
+            .field("token", &"<redacted>")
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
+            .field("display_name", &self.display_name)
+            .field("avatar_url", &self.avatar_url)
+            .field("software", &self.software)
+            .finish()
+    }
 }
 
 impl Drop for Account {
@@ -1042,12 +1058,22 @@ pub struct AuthSession {
     pub host: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct AuthResult {
     pub token: String,
     pub user: NormalizedUser,
+}
+
+// token をログ・panic メッセージに漏らさないため Debug は手書き
+impl std::fmt::Debug for AuthResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthResult")
+            .field("token", &"<redacted>")
+            .field("user", &self.user)
+            .finish()
+    }
 }
 
 // --- Raw Misskey API response types (for deserialization) ---
@@ -1291,11 +1317,22 @@ pub struct MutedWordsResult {
     pub muted_instances: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RawMiAuthResponse {
     pub ok: bool,
     pub token: Option<String>,
     pub user: Option<RawUser>,
+}
+
+// token をログ・panic メッセージに漏らさないため Debug は手書き
+impl std::fmt::Debug for RawMiAuthResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawMiAuthResponse")
+            .field("ok", &self.ok)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("user", &self.user)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1686,6 +1723,51 @@ mod tests {
         let json = serde_json::to_value(&public).unwrap();
         assert!(json.get("token").is_none());
         assert_eq!(json.get("hasToken").unwrap(), true);
+    }
+
+    // ---- Debug redaction ----
+
+    #[test]
+    fn account_debug_redacts_token() {
+        let account = Account {
+            id: "acc1".into(),
+            host: "misskey.io".into(),
+            token: "secret-token".into(),
+            user_id: "uid1".into(),
+            username: "taka".into(),
+            display_name: None,
+            avatar_url: None,
+            software: "misskey".into(),
+        };
+        let debug = format!("{account:?}");
+        assert!(!debug.contains("secret-token"), "token leaked: {debug}");
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("misskey.io"));
+    }
+
+    #[test]
+    fn auth_result_debug_redacts_token() {
+        let user: NormalizedUser =
+            serde_json::from_value(json!({"id": "u1", "username": "taka"})).unwrap();
+        let result = AuthResult {
+            token: "secret-token".into(),
+            user,
+        };
+        let debug = format!("{result:?}");
+        assert!(!debug.contains("secret-token"), "token leaked: {debug}");
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn raw_miauth_response_debug_redacts_token() {
+        let resp = RawMiAuthResponse {
+            ok: true,
+            token: Some("secret-token".into()),
+            user: None,
+        };
+        let debug = format!("{resp:?}");
+        assert!(!debug.contains("secret-token"), "token leaked: {debug}");
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
