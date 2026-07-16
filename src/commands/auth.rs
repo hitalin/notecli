@@ -134,11 +134,13 @@ pub async fn run_login(
     db.upsert_account(&account)?;
 
     // Store to keychain and verify before clearing DB (keyutils may lose keys across processes)
+    // 再起動非永続な store (Linux keyutils) では DB フォールバックを消さない (notedeck#785)
     if crate::keychain::store_token(&account_id, &auth.token).is_ok()
         && crate::keychain::get_token(&account_id)
             .ok()
             .flatten()
             .is_some()
+        && crate::keychain::is_persistent()
     {
         let _ = db.clear_token(&account_id);
     }

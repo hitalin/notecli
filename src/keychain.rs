@@ -40,6 +40,22 @@ pub fn init_store() -> Result<(), NoteDeckError> {
     Ok(())
 }
 
+/// 現在の credential store が再起動をまたいで永続するかどうか。
+///
+/// Linux の keyutils store はカーネルメモリ常駐（`UntilReboot`）のため false。
+/// false の場合、呼び出し側は DB 等の永続フォールバックを消してはならず、
+/// keychain は高速キャッシュとして扱う（notedeck#785）。
+#[cfg(feature = "keyring")]
+pub fn is_persistent() -> bool {
+    match keyring_core::get_default_store() {
+        Some(store) => matches!(
+            store.persistence(),
+            keyring_core::CredentialPersistence::UntilDelete
+        ),
+        None => false,
+    }
+}
+
 #[cfg(feature = "keyring")]
 pub fn store_token(account_id: &str, token: &str) -> Result<(), NoteDeckError> {
     let entry = keyring_core::Entry::new(SERVICE, account_id)
@@ -75,6 +91,29 @@ pub fn delete_token(account_id: &str) -> Result<(), NoteDeckError> {
 #[cfg(not(feature = "keyring"))]
 pub fn init_store() -> Result<(), NoteDeckError> {
     Ok(())
+}
+
+#[cfg(all(test, feature = "keyring", target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// Linux の keyutils store は UntilReboot なので、init 前後どちらでも
+    /// is_persistent() は false を返す（DB フォールバックを消してはならない)
+    #[test]
+    fn is_persistent_is_false_on_linux() {
+        assert!(
+            !is_persistent(),
+            "store 未設定時は安全側 (false) に倒すこと"
+        );
+        if init_store().is_ok() {
+            assert!(!is_persistent(), "keyutils store は再起動非永続");
+        }
+    }
+}
+
+#[cfg(not(feature = "keyring"))]
+pub fn is_persistent() -> bool {
+    false
 }
 
 #[cfg(not(feature = "keyring"))]

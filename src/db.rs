@@ -125,6 +125,11 @@ impl Database {
         let mut writer = Connection::open(path)?;
         writer.execute_batch(PRAGMAS_WRITER)?;
 
+        // DB は API トークンのフォールバック等の機微情報を含むため owner-only にする。
+        // WAL/SHM は SQLite が本体と同じパーミッションで作るが、既存ファイルは
+        // 直さないので明示的に締める (notedeck#785)
+        Self::restrict_permissions(path);
+
         // auto_vacuum=INCREMENTAL を保証してから migration 走らせる。
         // auto_vacuum モード変更は VACUUM 後に有効化される SQLite の仕様なので、
         // 既存 DB の場合はここで一度だけ VACUUM が走る。
@@ -162,6 +167,32 @@ impl Database {
         db.incremental_vacuum_step()?;
         Ok(db)
     }
+
+    /// DB 本体と WAL/SHM を owner-only (0600) に締める。失敗しても DB は開ける
+    /// (パーミッションより可用性を優先し、エラーは握りつぶす)。
+    #[cfg(unix)]
+    fn restrict_permissions(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let target = if suffix.is_empty() {
+                path.to_path_buf()
+            } else {
+                let mut os = path.as_os_str().to_owned();
+                os.push(suffix);
+                std::path::PathBuf::from(os)
+            };
+            if let Ok(meta) = std::fs::metadata(&target) {
+                let mut perms = meta.permissions();
+                if perms.mode() & 0o077 != 0 {
+                    perms.set_mode(0o600);
+                    let _ = std::fs::set_permissions(&target, perms);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_permissions(_path: &Path) {}
 
     /// `auto_vacuum=INCREMENTAL` を保証する。SQLite では `auto_vacuum` モード変更は
     /// VACUUM 後にしか有効化されない仕様のため、必要なら 1 度だけ VACUUM を走らせる。
@@ -1550,6 +1581,24 @@ mod tests {
         let results = db.search_cached_notes("acc-1", "Rust", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "n1");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn db_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // 既存 DB が緩いパーミッションでも open 時に締められること
+        std::fs::write(&db_path, b"").unwrap();
+        let mut perms = std::fs::metadata(&db_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+
+        let _db = Database::open(&db_path).unwrap();
+        let mode = std::fs::metadata(&db_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "DB は owner-only であること");
     }
 
     #[test]
