@@ -25,7 +25,8 @@ pub fn get_credentials(db: &Database, account_id: &str) -> Result<(String, Strin
 
     // Try keychain first (ignore errors — keychain may be unavailable)
     if let Some(token) = keychain::get_token(account_id).ok().flatten() {
-        if !account.token.is_empty() {
+        // 再起動非永続な store (Linux keyutils) では DB フォールバックを消さない (notedeck#785)
+        if !account.token.is_empty() && keychain::is_persistent() {
             let _ = db.clear_token(account_id);
         }
         return Ok((host, token));
@@ -35,7 +36,8 @@ pub fn get_credentials(db: &Database, account_id: &str) -> Result<(String, Strin
     let mut db_token = account.token.clone();
     if !db_token.is_empty() {
         // Try lazy migration to keychain; verify before clearing DB
-        if keychain::store_token(account_id, &db_token).is_ok()
+        if keychain::is_persistent()
+            && keychain::store_token(account_id, &db_token).is_ok()
             && keychain::get_token(account_id)
                 .ok()
                 .flatten()
