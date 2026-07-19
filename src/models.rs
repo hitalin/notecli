@@ -1101,6 +1101,9 @@ impl NoteUpdateBody {
             "reacted" => Self::Reacted(serde_json::from_value(body).ok()?),
             "unreacted" => Self::Unreacted(serde_json::from_value(body).ok()?),
             "pollVoted" => Self::PollVoted(serde_json::from_value(body).ok()?),
+            // deleted は body を省略するフォークがありうる。削除イベントを
+            // 落とすとゴーストノートが残るため null は空 body として扱う。
+            "deleted" if body.is_null() => Self::Deleted(NoteDeletedBody { deleted_at: None }),
             "deleted" => Self::Deleted(serde_json::from_value(body).ok()?),
             _ => return None,
         })
@@ -1741,6 +1744,17 @@ mod tests {
     #[test]
     fn note_update_body_from_raw_unknown_type_is_none() {
         assert!(NoteUpdateBody::from_raw("madePrivate", json!({})).is_none());
+    }
+
+    #[test]
+    fn note_update_body_from_raw_deleted_tolerates_null_body() {
+        // body を省略するフォークで削除イベントを落とさない
+        let parsed = NoteUpdateBody::from_raw("deleted", Value::Null)
+            .expect("null body deleted should parse");
+        assert!(matches!(
+            parsed,
+            NoteUpdateBody::Deleted(ref b) if b.deleted_at.is_none()
+        ));
     }
 
     // ---- TimelineType ----
