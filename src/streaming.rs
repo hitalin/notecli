@@ -14,8 +14,8 @@ use crate::db::Database;
 use crate::error::NoteDeckError;
 use crate::event_bus::{EventBus, SseEvent};
 use crate::models::{
-    ChatMessage, ChatReactionUser, NormalizedNote, NormalizedNotification, RawNote,
-    RawNotification, TimelineOptions, TimelineType,
+    ChatMessage, ChatReactionUser, NormalizedNote, NormalizedNotification, NoteReactedBody,
+    NoteUnreactedBody, NoteUpdateBody, RawNote, RawNotification, TimelineOptions, TimelineType,
 };
 
 /// Trait for emitting events to a frontend (e.g., Tauri WebView).
@@ -177,8 +177,9 @@ pub struct StreamNoteUpdatedEvent {
     pub account_id: String,
     pub subscription_id: String,
     pub note_id: String,
-    pub update_type: String,
-    pub body: Value,
+    /// flatten でワイヤ形 `{ updateType, body }` を維持する
+    #[serde(flatten)]
+    pub update: NoteUpdateBody,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,8 +187,8 @@ pub struct StreamNoteUpdatedEvent {
 pub struct StreamNoteCaptureEvent {
     pub account_id: String,
     pub note_id: String,
-    pub update_type: String,
-    pub body: Value,
+    #[serde(flatten)]
+    pub update: NoteUpdateBody,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1327,11 +1328,14 @@ async fn handle_ws_message(
                 .unwrap_or_default()
                 .to_owned();
             let update_body = body.get_mut("body").map(Value::take).unwrap_or_default();
+            let Some(update) = NoteUpdateBody::from_raw(&update_type, update_body) else {
+                tracing::debug!(update_type, "unknown noteUpdated type; dropped");
+                return;
+            };
             let payload = StreamNoteCaptureEvent {
                 account_id: account_id.to_string(),
                 note_id,
-                update_type,
-                body: update_body,
+                update,
             };
             emit_event!(
                 emitter,
@@ -1412,12 +1416,15 @@ async fn handle_ws_message(
             .get_mut("body")
             .map(Value::take)
             .unwrap_or_default();
+        let Some(update) = NoteUpdateBody::from_raw(&update_type, update_body) else {
+            tracing::debug!(update_type, "unknown noteUpdated type; dropped");
+            return;
+        };
         let payload = StreamNoteUpdatedEvent {
             account_id: account_id.to_string(),
             subscription_id: sub_id,
             note_id,
-            update_type,
-            body: update_body,
+            update,
         };
         emit_event!(
             emitter,
@@ -1757,11 +1764,10 @@ async fn polling_loop(
                                 let payload = StreamNoteCaptureEvent {
                                     account_id: account_id.clone(),
                                     note_id: note_id.clone(),
-                                    update_type: "reacted".to_string(),
-                                    body: json!({
-                                        "reaction": reaction,
-                                        "emoji": null,
-                                        "userId": null,
+                                    update: NoteUpdateBody::Reacted(NoteReactedBody {
+                                        reaction: reaction.clone(),
+                                        emoji: None,
+                                        user_id: None,
                                     }),
                                 };
                                 emit_or_log!(emitter, "stream-note-capture-updated", payload);
@@ -1774,10 +1780,9 @@ async fn polling_loop(
                                 let payload = StreamNoteCaptureEvent {
                                     account_id: account_id.clone(),
                                     note_id: note_id.clone(),
-                                    update_type: "unreacted".to_string(),
-                                    body: json!({
-                                        "reaction": reaction,
-                                        "userId": null,
+                                    update: NoteUpdateBody::Unreacted(NoteUnreactedBody {
+                                        reaction: reaction.clone(),
+                                        user_id: None,
                                     }),
                                 };
                                 emit_or_log!(emitter, "stream-note-capture-updated", payload);
@@ -1842,6 +1847,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn stream_note_updated_event_keeps_wire_shape() {
+        // #781: NoteUpdateBody を flatten しても歴史的ワイヤ形
+        // { noteId, updateType, body } が保たれることの契約テスト。
+        let payload = StreamNoteUpdatedEvent {
+            account_id: "acc-1".into(),
+            subscription_id: "sub-1".into(),
+            note_id: "n1".into(),
+            update: NoteUpdateBody::from_raw(
+                "reacted",
+                serde_json::json!({ "reaction": ":+1:", "userId": "u1" }),
+            )
+            .unwrap(),
+        };
+        let wire = serde_json::to_value(&payload).unwrap();
+        assert_eq!(wire["noteId"], "n1");
+        assert_eq!(wire["updateType"], "reacted");
+        assert_eq!(wire["body"]["reaction"], ":+1:");
+        assert_eq!(wire["accountId"], "acc-1");
     }
 
     #[test]
