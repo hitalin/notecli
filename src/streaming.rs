@@ -91,7 +91,18 @@ fn ws_config() -> WebSocketConfig {
 
 // --- Event payloads ---
 
-#[derive(Debug, Clone, Serialize)]
+/// `stream-status` で報告する接続状態 (#781)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "lowercase")]
+pub enum StreamConnectionState {
+    Connected,
+    Reconnecting,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNoteEvent {
     pub account_id: String,
@@ -99,7 +110,8 @@ pub struct StreamNoteEvent {
     pub note: Arc<NormalizedNote>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNotificationEvent {
     pub account_id: String,
@@ -107,7 +119,8 @@ pub struct StreamNotificationEvent {
     pub notification: NormalizedNotification,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamMentionEvent {
     pub account_id: String,
@@ -115,7 +128,8 @@ pub struct StreamMentionEvent {
     pub note: Arc<NormalizedNote>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageEvent {
     pub account_id: String,
@@ -123,7 +137,8 @@ pub struct StreamChatMessageEvent {
     pub message: ChatMessage,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageDeletedEvent {
     pub account_id: String,
@@ -142,7 +157,8 @@ struct ChatReactionWsBody {
     user: Option<ChatReactionUser>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageReactedEvent {
     pub account_id: String,
@@ -152,7 +168,8 @@ pub struct StreamChatMessageReactedEvent {
     pub user: Option<ChatReactionUser>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageUnreactedEvent {
     pub account_id: String,
@@ -162,7 +179,8 @@ pub struct StreamChatMessageUnreactedEvent {
     pub user: Option<ChatReactionUser>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamMainEvent {
     pub account_id: String,
@@ -171,7 +189,8 @@ pub struct StreamMainEvent {
     pub body: Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNoteUpdatedEvent {
     pub account_id: String,
@@ -182,7 +201,8 @@ pub struct StreamNoteUpdatedEvent {
     pub update: NoteUpdateBody,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNoteCaptureEvent {
     pub account_id: String,
@@ -191,11 +211,12 @@ pub struct StreamNoteCaptureEvent {
     pub update: NoteUpdateBody,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamStatusEvent {
     pub account_id: String,
-    pub state: String,
+    pub state: StreamConnectionState,
 }
 
 // --- Internal commands sent to the WebSocket task ---
@@ -300,16 +321,16 @@ impl StreamingManager {
             // 取り逃した状態遷移をここで補正できる (楽観的に connected と
             // 見なす JS 側ロジックを置かないための供給側の責務)。
             let state = if handle.connected.load(std::sync::atomic::Ordering::Relaxed) {
-                "connected"
+                StreamConnectionState::Connected
             } else {
-                "reconnecting"
+                StreamConnectionState::Reconnecting
             };
             emit_or_log!(
                 self.emitter,
                 "stream-status",
                 StreamStatusEvent {
                     account_id: account_id.to_string(),
-                    state: state.to_string(),
+                    state,
                 }
             );
             return Ok(());
@@ -391,7 +412,11 @@ impl StreamingManager {
             "stream-status",
             StreamStatusEvent {
                 account_id: account_id.to_string(),
-                state: if connected { "connected" } else { "reconnecting" }.to_string(),
+                state: if connected {
+                    StreamConnectionState::Connected
+                } else {
+                    StreamConnectionState::Reconnecting
+                },
             }
         );
 
@@ -434,7 +459,7 @@ impl StreamingManager {
             "stream-status",
             StreamStatusEvent {
                 account_id: account_id.to_string(),
-                state: "disconnected".to_string(),
+                state: StreamConnectionState::Disconnected,
             }
         );
     }
@@ -480,7 +505,7 @@ impl StreamingManager {
                     "stream-status",
                     StreamStatusEvent {
                         account_id: account_id.to_string(),
-                        state: "connected".to_string(),
+                        state: StreamConnectionState::Connected,
                     }
                 );
             }
@@ -1000,7 +1025,7 @@ async fn connection_task(
             "stream-status",
             StreamStatusEvent {
                 account_id: account_id.clone(),
-                state: "reconnecting".to_string(),
+                state: StreamConnectionState::Reconnecting,
             }
         );
 
@@ -1047,7 +1072,7 @@ async fn connection_task(
                     "stream-status",
                     StreamStatusEvent {
                         account_id: account_id.clone(),
-                        state: "connected".to_string(),
+                        state: StreamConnectionState::Connected,
                     }
                 );
 
@@ -1809,7 +1834,7 @@ async fn polling_loop(
                 "stream-status",
                 StreamStatusEvent {
                     account_id: account_id.clone(),
-                    state: "reconnecting".to_string(),
+                    state: StreamConnectionState::Reconnecting,
                 }
             );
 
