@@ -170,7 +170,7 @@ impl StreamEvent {
 }
 
 /// `stream-status` で報告する接続状態 (#781)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum StreamConnectionState {
@@ -179,16 +179,17 @@ pub enum StreamConnectionState {
     Disconnected,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNoteEvent {
     pub account_id: String,
     pub subscription_id: String,
+    #[schema(value_type = NormalizedNote)]
     pub note: Arc<NormalizedNote>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNotificationEvent {
@@ -197,16 +198,17 @@ pub struct StreamNotificationEvent {
     pub notification: NormalizedNotification,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamMentionEvent {
     pub account_id: String,
     pub subscription_id: String,
+    #[schema(value_type = NormalizedNote)]
     pub note: Arc<NormalizedNote>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageEvent {
@@ -215,7 +217,7 @@ pub struct StreamChatMessageEvent {
     pub message: ChatMessage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageDeletedEvent {
@@ -235,7 +237,7 @@ struct ChatReactionWsBody {
     user: Option<ChatReactionUser>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageReactedEvent {
@@ -246,7 +248,7 @@ pub struct StreamChatMessageReactedEvent {
     pub user: Option<ChatReactionUser>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamChatMessageUnreactedEvent {
@@ -257,7 +259,7 @@ pub struct StreamChatMessageUnreactedEvent {
     pub user: Option<ChatReactionUser>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamMainEvent {
@@ -267,7 +269,7 @@ pub struct StreamMainEvent {
     pub body: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNoteUpdatedEvent {
@@ -279,7 +281,7 @@ pub struct StreamNoteUpdatedEvent {
     pub update: NoteUpdateBody,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamNoteCaptureEvent {
@@ -289,7 +291,7 @@ pub struct StreamNoteCaptureEvent {
     pub update: NoteUpdateBody,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct StreamStatusEvent {

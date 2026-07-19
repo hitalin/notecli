@@ -736,6 +736,31 @@ async fn get_user_notes(
     Ok(Json(notes))
 }
 
+/// SSE `data:` payload の union (#781 Phase 4)。discriminator は SSE の
+/// `event:` フィールド (out-of-band) なので untagged oneOf として文書化する。
+/// `event:` 名と variant の対応:
+/// note/mention → StreamNote/StreamMentionEvent、note-updated →
+/// StreamNoteUpdatedEvent、note-capture-updated → StreamNoteCaptureEvent、
+/// notification → StreamNotificationEvent、main-{eventType} → StreamMainEvent、
+/// chat → StreamChatMessageEvent、chat-deleted / chat-reacted / chat-unreacted →
+/// StreamChatMessage{Deleted,Reacted,Unreacted}Event、status → StreamStatusEvent
+#[derive(serde::Serialize, ToSchema)]
+#[serde(untagged)]
+#[allow(dead_code, clippy::large_enum_variant)] // OpenAPI ドキュメント専用の型
+enum SseEventPayload {
+    Note(crate::streaming::StreamNoteEvent),
+    Notification(crate::streaming::StreamNotificationEvent),
+    Mention(crate::streaming::StreamMentionEvent),
+    Main(crate::streaming::StreamMainEvent),
+    NoteUpdated(crate::streaming::StreamNoteUpdatedEvent),
+    NoteCaptureUpdated(crate::streaming::StreamNoteCaptureEvent),
+    ChatMessage(crate::streaming::StreamChatMessageEvent),
+    ChatMessageDeleted(crate::streaming::StreamChatMessageDeletedEvent),
+    ChatMessageReacted(crate::streaming::StreamChatMessageReactedEvent),
+    ChatMessageUnreacted(crate::streaming::StreamChatMessageUnreactedEvent),
+    Status(crate::streaming::StreamStatusEvent),
+}
+
 #[utoipa::path(
     get, path = "/api/events", tag = "events",
     security(("bearer_auth" = [])),
@@ -743,9 +768,13 @@ async fn get_user_notes(
     responses(
         (status = 200,
          description = "Server-sent event stream (`text/event-stream`). Each event \
-            carries an `event:` type and a JSON `data:` payload. OpenAPI cannot model \
-            a streaming body, so the schema is shown as a string.",
-         content_type = "text/event-stream", body = String),
+            carries an `event:` type and a JSON `data:` payload typed as \
+            `SseEventPayload` — the `event:` name selects the variant \
+            (`note` / `mention` / `note-updated` / `note-capture-updated` / \
+            `notification` / `main-{eventType}` / `chat` / `chat-deleted` / \
+            `chat-reacted` / `chat-unreacted` / `status`). \
+            The `type` query param filters by event-name prefix.",
+         content_type = "text/event-stream", body = SseEventPayload),
         (status = 401, description = "Unauthorized", body = ApiErrorResponse),
     )
 )]
