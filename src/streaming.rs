@@ -20,15 +20,16 @@ use crate::models::{
 
 /// Trait for emitting events to a frontend (e.g., Tauri WebView).
 /// In CLI/daemon mode, use `NoopEmitter`.
+/// #781 Phase 3: 生 JSON は WS 受信境界で死ぬ — この境界は typed StreamEvent のみ。
 pub trait FrontendEmitter: Send + Sync {
-    fn emit(&self, event: &str, payload: Value);
+    fn emit(&self, event: StreamEvent);
 }
 
 /// No-op emitter for headless/CLI mode.
 pub struct NoopEmitter;
 
 impl FrontendEmitter for NoopEmitter {
-    fn emit(&self, _event: &str, _payload: Value) {}
+    fn emit(&self, _event: StreamEvent) {}
 }
 
 /// Emitter that forwards events to the EventBus for SSE delivery.
@@ -43,31 +44,22 @@ impl EventBusEmitter {
 }
 
 impl FrontendEmitter for EventBusEmitter {
-    fn emit(&self, event: &str, payload: Value) {
+    fn emit(&self, event: StreamEvent) {
         self.event_bus.send(SseEvent {
-            event_type: event.to_string(),
-            data: payload,
+            event_type: event.sse_event_type(),
+            data: event.payload_value(),
         });
     }
 }
 
-/// Emit to FrontendEmitter only (status events, polling, etc.)
-macro_rules! emit_or_log {
-    ($emitter:expr, $event:expr, $payload:expr) => {
-        $emitter.emit($event, serde_json::to_value(&$payload).unwrap_or_default());
-    };
-}
-
-/// Serialize payload once and send to both EventBus and FrontendEmitter.
-macro_rules! emit_event {
-    ($emitter:expr, $event_bus:expr, $event_type:expr, $emitter_event:expr, $payload:expr) => {{
-        let data = serde_json::to_value(&$payload).unwrap_or_default();
-        $event_bus.send(SseEvent {
-            event_type: $event_type.to_string(),
-            data: data.clone(),
-        });
-        $emitter.emit($emitter_event, data);
-    }};
+/// Send to both the EventBus (SSE) and the FrontendEmitter.
+/// status / polling 由来 capture は従来どおり emitter のみ (SSE に流さない)。
+fn emit_both(emitter: &dyn FrontendEmitter, event_bus: &EventBus, event: StreamEvent) {
+    event_bus.send(SseEvent {
+        event_type: event.sse_event_type(),
+        data: event.payload_value(),
+    });
+    emitter.emit(event);
 }
 
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -90,6 +82,92 @@ fn ws_config() -> WebSocketConfig {
 }
 
 // --- Event payloads ---
+
+/// 全ストリーミングイベントの typed union (#781 Phase 3)。
+/// adjacent tagging (kind/payload) は Tauri 統合チャネル `stream-event` の
+/// 歴史的ワイヤ形 `{ kind, payload }` と一致する。Box は serde/specta とも
+/// 透過 (variant 間サイズ差の抑制、clippy::large_enum_variant)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(tag = "kind", content = "payload")]
+pub enum StreamEvent {
+    #[serde(rename = "stream-note")]
+    Note(Box<StreamNoteEvent>),
+    #[serde(rename = "stream-notification")]
+    Notification(Box<StreamNotificationEvent>),
+    #[serde(rename = "stream-mention")]
+    Mention(Box<StreamMentionEvent>),
+    #[serde(rename = "stream-main-event")]
+    MainEvent(Box<StreamMainEvent>),
+    #[serde(rename = "stream-note-updated")]
+    NoteUpdated(Box<StreamNoteUpdatedEvent>),
+    #[serde(rename = "stream-note-capture-updated")]
+    NoteCaptureUpdated(Box<StreamNoteCaptureEvent>),
+    #[serde(rename = "stream-chat-message")]
+    ChatMessage(Box<StreamChatMessageEvent>),
+    #[serde(rename = "stream-chat-message-deleted")]
+    ChatMessageDeleted(Box<StreamChatMessageDeletedEvent>),
+    #[serde(rename = "stream-chat-message-reacted")]
+    ChatMessageReacted(Box<StreamChatMessageReactedEvent>),
+    #[serde(rename = "stream-chat-message-unreacted")]
+    ChatMessageUnreacted(Box<StreamChatMessageUnreactedEvent>),
+    #[serde(rename = "stream-status")]
+    Status(Box<StreamStatusEvent>),
+}
+
+impl StreamEvent {
+    /// Tauri 統合チャネルの kind (= serde rename と同一)。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Note(_) => "stream-note",
+            Self::Notification(_) => "stream-notification",
+            Self::Mention(_) => "stream-mention",
+            Self::MainEvent(_) => "stream-main-event",
+            Self::NoteUpdated(_) => "stream-note-updated",
+            Self::NoteCaptureUpdated(_) => "stream-note-capture-updated",
+            Self::ChatMessage(_) => "stream-chat-message",
+            Self::ChatMessageDeleted(_) => "stream-chat-message-deleted",
+            Self::ChatMessageReacted(_) => "stream-chat-message-reacted",
+            Self::ChatMessageUnreacted(_) => "stream-chat-message-unreacted",
+            Self::Status(_) => "stream-status",
+        }
+    }
+
+    /// SSE (`/api/events`) の event type。歴史的命名を維持する。
+    pub fn sse_event_type(&self) -> String {
+        match self {
+            Self::Note(_) => "note".into(),
+            Self::Notification(_) => "notification".into(),
+            Self::Mention(_) => "mention".into(),
+            Self::MainEvent(e) => format!("main-{}", e.event_type),
+            Self::NoteUpdated(_) => "note-updated".into(),
+            Self::NoteCaptureUpdated(_) => "note-capture-updated".into(),
+            Self::ChatMessage(_) => "chat".into(),
+            Self::ChatMessageDeleted(_) => "chat-deleted".into(),
+            Self::ChatMessageReacted(_) => "chat-reacted".into(),
+            Self::ChatMessageUnreacted(_) => "chat-unreacted".into(),
+            Self::Status(_) => "status".into(),
+        }
+    }
+
+    /// payload 部のみを serialize する (SSE data / raw tap 用)。
+    pub fn payload_value(&self) -> Value {
+        let value = match self {
+            Self::Note(e) => serde_json::to_value(e),
+            Self::Notification(e) => serde_json::to_value(e),
+            Self::Mention(e) => serde_json::to_value(e),
+            Self::MainEvent(e) => serde_json::to_value(e),
+            Self::NoteUpdated(e) => serde_json::to_value(e),
+            Self::NoteCaptureUpdated(e) => serde_json::to_value(e),
+            Self::ChatMessage(e) => serde_json::to_value(e),
+            Self::ChatMessageDeleted(e) => serde_json::to_value(e),
+            Self::ChatMessageReacted(e) => serde_json::to_value(e),
+            Self::ChatMessageUnreacted(e) => serde_json::to_value(e),
+            Self::Status(e) => serde_json::to_value(e),
+        };
+        value.unwrap_or_default()
+    }
+}
 
 /// `stream-status` で報告する接続状態 (#781)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,14 +403,10 @@ impl StreamingManager {
             } else {
                 StreamConnectionState::Reconnecting
             };
-            emit_or_log!(
-                self.emitter,
-                "stream-status",
-                StreamStatusEvent {
+            self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                     account_id: account_id.to_string(),
                     state,
-                }
-            );
+                })));
             return Ok(());
         }
 
@@ -407,18 +481,14 @@ impl StreamingManager {
             },
         );
 
-        emit_or_log!(
-            self.emitter,
-            "stream-status",
-            StreamStatusEvent {
+        self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                 account_id: account_id.to_string(),
                 state: if connected {
                     StreamConnectionState::Connected
                 } else {
                     StreamConnectionState::Reconnecting
                 },
-            }
-        );
+            })));
 
         Ok(())
     }
@@ -454,14 +524,10 @@ impl StreamingManager {
         captured.remove(account_id);
         drop(captured);
 
-        emit_or_log!(
-            self.emitter,
-            "stream-status",
-            StreamStatusEvent {
+        self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                 account_id: account_id.to_string(),
                 state: StreamConnectionState::Disconnected,
-            }
-        );
+            })));
     }
 
     /// Switch between realtime (WebSocket) and polling (HTTP) mode.
@@ -500,14 +566,10 @@ impl StreamingManager {
                 let interval = Duration::from_millis(interval_ms.unwrap_or(15_000));
                 self.start_polling(account_id, host, token, interval).await;
 
-                emit_or_log!(
-                    self.emitter,
-                    "stream-status",
-                    StreamStatusEvent {
+                self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                         account_id: account_id.to_string(),
                         state: StreamConnectionState::Connected,
-                    }
-                );
+                    })));
             }
             _ => {
                 return Err(NoteDeckError::InvalidInput(format!("unknown mode: {mode}")));
@@ -1020,14 +1082,10 @@ async fn connection_task(
     // Reconnection loop
     loop {
         connected_flag.store(false, Ordering::Relaxed);
-        emit_or_log!(
-            emitter,
-            "stream-status",
-            StreamStatusEvent {
+        emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                 account_id: account_id.clone(),
                 state: StreamConnectionState::Reconnecting,
-            }
-        );
+            })));
 
         // Wait with backoff, but listen for Shutdown during the wait.
         // Equal Jitter (sleep in [backoff/2, backoff]) de-syncs reconnects
@@ -1067,14 +1125,10 @@ async fn connection_task(
                 backoff_secs = 1; // Reset backoff on success
                 connected_flag.store(true, Ordering::Relaxed);
 
-                emit_or_log!(
-                    emitter,
-                    "stream-status",
-                    StreamStatusEvent {
+                emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                         account_id: account_id.clone(),
                         state: StreamConnectionState::Connected,
-                    }
-                );
+                    })));
 
                 let reason = run_ws_session(
                     &emitter,
@@ -1362,13 +1416,7 @@ async fn handle_ws_message(
                 note_id,
                 update,
             };
-            emit_event!(
-                emitter,
-                event_bus,
-                "note-capture-updated",
-                "stream-note-capture-updated",
-                payload
-            );
+            emit_both(emitter, event_bus, StreamEvent::NoteCaptureUpdated(Box::new(payload)));
         }
         return;
     }
@@ -1423,7 +1471,7 @@ async fn handle_ws_message(
                 subscription_id: sub_id,
                 note,
             };
-            emit_event!(emitter, event_bus, "note", "stream-note", payload);
+            emit_both(emitter, event_bus, StreamEvent::Note(Box::new(payload)));
         }
     } else if is_note_channel && event_type == "noteUpdated" {
         let note_id = event_body
@@ -1451,13 +1499,7 @@ async fn handle_ws_message(
             note_id,
             update,
         };
-        emit_event!(
-            emitter,
-            event_bus,
-            "note-updated",
-            "stream-note-updated",
-            payload
-        );
+        emit_both(emitter, event_bus, StreamEvent::NoteUpdated(Box::new(payload)));
     } else if kind == "main" {
         if event_type == "notification" {
             if let Ok(raw) = serde_json::from_value::<RawNotification>(event_body) {
@@ -1467,24 +1509,16 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     notification,
                 };
-                emit_event!(
-                    emitter,
-                    event_bus,
-                    "notification",
-                    "stream-notification",
-                    payload
-                );
+                emit_both(emitter, event_bus, StreamEvent::Notification(Box::new(payload)));
             }
         } else if event_type == "mention" || event_type == "reply" {
-            // Serialize event_body as main-event first, then try parsing as mention
-            let main_data = serde_json::to_value(&StreamMainEvent {
+            // main-event として emit しつつ、mention としても parse を試みる
+            emitter.emit(StreamEvent::MainEvent(Box::new(StreamMainEvent {
                 account_id: account_id.to_string(),
                 subscription_id: sub_id.clone(),
                 event_type,
                 body: event_body.clone(),
-            })
-            .unwrap_or_default();
-            emitter.emit("stream-main-event", main_data);
+            })));
 
             if let Ok(raw) = serde_json::from_value::<RawNote>(event_body) {
                 let note = Arc::new(raw.normalize(account_id, &host));
@@ -1493,23 +1527,16 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     note,
                 };
-                emit_event!(emitter, event_bus, "mention", "stream-mention", payload);
+                emit_both(emitter, event_bus, StreamEvent::Mention(Box::new(payload)));
             }
         } else {
-            let main_event_type = format!("main-{event_type}");
             let payload = StreamMainEvent {
                 account_id: account_id.to_string(),
                 subscription_id: sub_id,
                 event_type,
                 body: event_body,
             };
-            emit_event!(
-                emitter,
-                event_bus,
-                main_event_type,
-                "stream-main-event",
-                payload
-            );
+            emit_both(emitter, event_bus, StreamEvent::MainEvent(Box::new(payload)));
         }
     } else if kind == "chat" {
         if event_type == "message" {
@@ -1546,7 +1573,7 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     message: msg,
                 };
-                emit_event!(emitter, event_bus, "chat", "stream-chat-message", payload);
+                emit_both(emitter, event_bus, StreamEvent::ChatMessage(Box::new(payload)));
             }
         } else if event_type == "deleted" {
             if let Some(id) = event_body.as_str() {
@@ -1567,13 +1594,7 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     message_id: id_owned,
                 };
-                emit_event!(
-                    emitter,
-                    event_bus,
-                    "chat-deleted",
-                    "stream-chat-message-deleted",
-                    payload
-                );
+                emit_both(emitter, event_bus, StreamEvent::ChatMessageDeleted(Box::new(payload)));
             }
         } else if event_type == "react" || event_type == "unreact" {
             let is_react = event_type == "react";
@@ -1603,13 +1624,7 @@ async fn handle_ws_message(
                         reaction: body.reaction,
                         user: body.user,
                     };
-                    emit_event!(
-                        emitter,
-                        event_bus,
-                        "chat-reacted",
-                        "stream-chat-message-reacted",
-                        payload
-                    );
+                    emit_both(emitter, event_bus, StreamEvent::ChatMessageReacted(Box::new(payload)));
                 } else {
                     let payload = StreamChatMessageUnreactedEvent {
                         account_id: account_id.to_string(),
@@ -1618,13 +1633,7 @@ async fn handle_ws_message(
                         reaction: body.reaction,
                         user: body.user,
                     };
-                    emit_event!(
-                        emitter,
-                        event_bus,
-                        "chat-unreacted",
-                        "stream-chat-message-unreacted",
-                        payload
-                    );
+                    emit_both(emitter, event_bus, StreamEvent::ChatMessageUnreacted(Box::new(payload)));
                 }
             }
         }
@@ -1721,7 +1730,7 @@ async fn polling_loop(
                             subscription_id: sub_id.clone(),
                             note,
                         };
-                        emit_event!(emitter, event_bus, "note", "stream-note", payload);
+                        emit_both(emitter.as_ref(), &event_bus, StreamEvent::Note(Box::new(payload)));
                     }
 
                     consecutive_failures = 0;
@@ -1795,7 +1804,7 @@ async fn polling_loop(
                                         user_id: None,
                                     }),
                                 };
-                                emit_or_log!(emitter, "stream-note-capture-updated", payload);
+                                emitter.emit(StreamEvent::NoteCaptureUpdated(Box::new(payload)));
                             }
                         }
 
@@ -1810,7 +1819,7 @@ async fn polling_loop(
                                         user_id: None,
                                     }),
                                 };
-                                emit_or_log!(emitter, "stream-note-capture-updated", payload);
+                                emitter.emit(StreamEvent::NoteCaptureUpdated(Box::new(payload)));
                             }
                         }
 
@@ -1829,14 +1838,10 @@ async fn polling_loop(
                 (1u64 << consecutive_failures.min(5)).min(MAX_POLL_BACKOFF_SECS)
             };
 
-            emit_or_log!(
-                emitter,
-                "stream-status",
-                StreamStatusEvent {
+            emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                     account_id: account_id.clone(),
                     state: StreamConnectionState::Reconnecting,
-                }
-            );
+                })));
 
             Duration::from_secs(backoff)
         } else {
@@ -1904,11 +1909,11 @@ mod tests {
     }
 
     /// stream-status イベントを channel に流すテスト用 emitter。
-    struct ChannelEmitter(mpsc::UnboundedSender<(String, Value)>);
+    struct ChannelEmitter(mpsc::UnboundedSender<StreamEvent>);
 
     impl FrontendEmitter for ChannelEmitter {
-        fn emit(&self, event: &str, payload: Value) {
-            let _ = self.0.send((event.to_string(), payload));
+        fn emit(&self, event: StreamEvent) {
+            let _ = self.0.send(event);
         }
     }
 
@@ -1939,11 +1944,14 @@ mod tests {
         // (ミューテーション注入で FAILED になることを確認済み)。
         let mut reconnecting_count = 0;
         while reconnecting_count < 2 {
-            let (event, payload) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
                 .await
                 .expect("timed out waiting for reconnect loop to emit stream-status")
                 .expect("emitter channel closed before loop emitted");
-            if event == "stream-status" && payload["state"] == "reconnecting" {
+            if matches!(
+                event,
+                StreamEvent::Status(ref s) if s.state == StreamConnectionState::Reconnecting
+            ) {
                 reconnecting_count += 1;
             }
         }
