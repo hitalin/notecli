@@ -1076,6 +1076,87 @@ impl std::fmt::Debug for AuthResult {
     }
 }
 
+// --- Streaming noteUpdated payloads (#781 typed events) ---
+
+/// Typed body of a Misskey `noteUpdated` streaming event.
+/// Adjacent tagging (`updateType` + `body`) preserves the historical wire shape
+/// `{ updateType: "reacted", body: { ... } }` so the JSON consumers read is
+/// unchanged while the contract becomes typed end-to-end.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(tag = "updateType", content = "body", rename_all = "camelCase")]
+pub enum NoteUpdateBody {
+    Reacted(NoteReactedBody),
+    Unreacted(NoteUnreactedBody),
+    PollVoted(NotePollVotedBody),
+    Deleted(NoteDeletedBody),
+}
+
+impl NoteUpdateBody {
+    /// Parse the raw `{ type, body }` of a Misskey `noteUpdated` event.
+    /// Unknown update types (fork extensions) yield `None` and are dropped at
+    /// the WS boundary; the inspector's raw tap is unaffected.
+    pub fn from_raw(update_type: &str, body: Value) -> Option<Self> {
+        Some(match update_type {
+            "reacted" => Self::Reacted(serde_json::from_value(body).ok()?),
+            "unreacted" => Self::Unreacted(serde_json::from_value(body).ok()?),
+            "pollVoted" => Self::PollVoted(serde_json::from_value(body).ok()?),
+            // deleted は body を省略するフォークがありうる。削除イベントを
+            // 落とすとゴーストノートが残るため null は空 body として扱う。
+            "deleted" if body.is_null() => Self::Deleted(NoteDeletedBody { deleted_at: None }),
+            "deleted" => Self::Deleted(serde_json::from_value(body).ok()?),
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteReactedBody {
+    pub reaction: String,
+    /// Custom emoji info。本家は `{ name, url }`、unicode 絵文字は null/欠落。
+    /// フォークが bare string を送る揺れもここで吸収する。
+    #[serde(default)]
+    pub emoji: Option<ReactionEmoji>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(untagged)]
+pub enum ReactionEmoji {
+    Custom { name: String, url: String },
+    Code(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteUnreactedBody {
+    pub reaction: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct NotePollVotedBody {
+    pub choice: i64,
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteDeletedBody {
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+}
+
 // --- Raw Misskey API response types (for deserialization) ---
 
 #[derive(Debug, Deserialize)]
@@ -1601,6 +1682,80 @@ impl RawNotification {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ---- NoteUpdateBody (#781) ----
+
+    #[test]
+    fn note_update_body_from_raw_reacted_parses_custom_emoji() {
+        let body = json!({
+            "reaction": ":ablobcat:",
+            "emoji": { "name": "ablobcat", "url": "https://example.com/e.png" },
+            "userId": "u1"
+        });
+        let parsed = NoteUpdateBody::from_raw("reacted", body).expect("should parse");
+        match &parsed {
+            NoteUpdateBody::Reacted(b) => {
+                assert_eq!(b.reaction, ":ablobcat:");
+                assert!(matches!(b.emoji, Some(ReactionEmoji::Custom { .. })));
+                assert_eq!(b.user_id.as_deref(), Some("u1"));
+            }
+            other => panic!("expected Reacted, got {other:?}"),
+        }
+        // ワイヤ形は歴史的な { updateType, body } を維持する
+        let wire = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(wire["updateType"], "reacted");
+        assert_eq!(wire["body"]["reaction"], ":ablobcat:");
+    }
+
+    #[test]
+    fn note_update_body_from_raw_reacted_accepts_null_and_string_emoji() {
+        // unicode 絵文字: emoji は null
+        let parsed =
+            NoteUpdateBody::from_raw("reacted", json!({ "reaction": "👍", "emoji": null }))
+                .expect("null emoji should parse");
+        assert!(matches!(parsed, NoteUpdateBody::Reacted(ref b) if b.emoji.is_none()));
+
+        // フォーク揺れ: emoji が bare string
+        let parsed =
+            NoteUpdateBody::from_raw("reacted", json!({ "reaction": "x", "emoji": "blob" }))
+                .expect("string emoji should parse");
+        assert!(matches!(
+            parsed,
+            NoteUpdateBody::Reacted(ref b)
+                if matches!(b.emoji, Some(ReactionEmoji::Code(_)))
+        ));
+    }
+
+    #[test]
+    fn note_update_body_from_raw_deleted_and_poll_voted() {
+        let deleted =
+            NoteUpdateBody::from_raw("deleted", json!({ "deletedAt": "2026-01-01T00:00:00Z" }))
+                .expect("deleted should parse");
+        assert!(matches!(
+            deleted,
+            NoteUpdateBody::Deleted(ref b) if b.deleted_at.is_some()
+        ));
+
+        let voted = NoteUpdateBody::from_raw("pollVoted", json!({ "choice": 2, "userId": "u1" }))
+            .expect("pollVoted should parse");
+        assert!(matches!(voted, NoteUpdateBody::PollVoted(ref b) if b.choice == 2));
+    }
+
+    #[test]
+    fn note_update_body_from_raw_unknown_type_is_none() {
+        assert!(NoteUpdateBody::from_raw("madePrivate", json!({})).is_none());
+    }
+
+    #[test]
+    fn note_update_body_from_raw_deleted_tolerates_null_body() {
+        // body を省略するフォークで削除イベントを落とさない
+        let parsed = NoteUpdateBody::from_raw("deleted", Value::Null)
+            .expect("null body deleted should parse");
+        assert!(matches!(
+            parsed,
+            NoteUpdateBody::Deleted(ref b) if b.deleted_at.is_none()
+        ));
+    }
 
     // ---- TimelineType ----
 
