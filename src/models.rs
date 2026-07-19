@@ -941,7 +941,7 @@ pub struct Channel {
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
@@ -961,7 +961,7 @@ pub struct ChatMessage {
     pub reactions: Vec<ChatMessageReaction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageReaction {
@@ -969,7 +969,7 @@ pub struct ChatMessageReaction {
     pub reaction: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatReactionUser {
@@ -980,7 +980,7 @@ pub struct ChatReactionUser {
     pub avatar_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatUser {
@@ -995,7 +995,7 @@ pub struct ChatUser {
     pub avatar_decorations: Vec<AvatarDecoration>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRoom {
@@ -1082,7 +1082,7 @@ impl std::fmt::Debug for AuthResult {
 /// Adjacent tagging (`updateType` + `body`) preserves the historical wire shape
 /// `{ updateType: "reacted", body: { ... } }` so the JSON consumers read is
 /// unchanged while the contract becomes typed end-to-end.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "updateType", content = "body", rename_all = "camelCase")]
 pub enum NoteUpdateBody {
@@ -1110,7 +1110,7 @@ impl NoteUpdateBody {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NoteReactedBody {
@@ -1123,7 +1123,7 @@ pub struct NoteReactedBody {
     pub user_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(untagged)]
 pub enum ReactionEmoji {
@@ -1131,7 +1131,7 @@ pub enum ReactionEmoji {
     Code(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NoteUnreactedBody {
@@ -1140,7 +1140,7 @@ pub struct NoteUnreactedBody {
     pub user_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NotePollVotedBody {
@@ -1149,7 +1149,7 @@ pub struct NotePollVotedBody {
     pub user_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
 pub struct NoteDeletedBody {
