@@ -8,11 +8,11 @@ use serde_json::{json, Value};
 
 use crate::error::NoteDeckError;
 use crate::models::{
-    Antenna, AuthResult, Channel, ChatMessage, ChatUser, Clip, CreateNoteParams,
+    Antenna, AuthResult, Channel, ChatMessage, ChatUser, Clip, CreateNoteParams, MutedWordsResult,
     NormalizedDriveFile, NormalizedNote, NormalizedNoteReaction, NormalizedNotification,
-    MutedWordsResult, NormalizedUser, NormalizedUserDetail, RawCreateNoteResponse, RawDriveFile,
-    RawEmojisResponse, RawMiAuthResponse, RawNote, RawNoteReaction, RawNotification, RawUser,
-    RawUserDetail, SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
+    NormalizedUser, NormalizedUserDetail, RawCreateNoteResponse, RawDriveFile, RawEmojisResponse,
+    RawMiAuthResponse, RawNote, RawNoteReaction, RawNotification, RawUser, RawUserDetail,
+    SearchOptions, ServerEmoji, TimelineOptions, TimelineType, UserList,
 };
 
 /// Maximum response body size (50 MB) to prevent memory exhaustion from malicious servers.
@@ -251,7 +251,12 @@ impl MisskeyClient {
         antenna_id: &str,
     ) -> Result<Antenna, NoteDeckError> {
         let data = self
-            .request(host, token, "antennas/show", json!({ "antennaId": antenna_id }))
+            .request(
+                host,
+                token,
+                "antennas/show",
+                json!({ "antennaId": antenna_id }),
+            )
             .await?;
         let antenna: Antenna = serde_json::from_value(data)?;
         Ok(antenna)
@@ -2901,7 +2906,10 @@ mod tests {
         let role = notifs[0].role.as_ref().expect("role present");
         assert_eq!(role.name, "Active");
         assert_eq!(role.color.as_deref(), Some("#ff0000"));
-        assert_eq!(role.icon_url.as_deref(), Some("https://example.com/role.png"));
+        assert_eq!(
+            role.icon_url.as_deref(),
+            Some("https://example.com/role.png")
+        );
     }
 
     #[tokio::test]
@@ -3596,7 +3604,9 @@ mod tests {
         // withReplies のみ指定 → notify は body に含まれないこと
         Mock::given(method("POST"))
             .and(path("/api/following/update"))
-            .and(body_partial_json(json!({ "userId": "u1", "withReplies": false })))
+            .and(body_partial_json(
+                json!({ "userId": "u1", "withReplies": false }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .mount(&server)
             .await;
@@ -3613,7 +3623,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/users/update-memo"))
-            .and(body_partial_json(json!({ "userId": "u1", "memo": "friend" })))
+            .and(body_partial_json(
+                json!({ "userId": "u1", "memo": "friend" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
             .mount(&server)
             .await;
@@ -3700,10 +3712,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/notes/search"))
-            .and(body_partial_json(json!({ "query": "rust", "userId": "u1" })))
+            .and(body_partial_json(
+                json!({ "query": "rust", "userId": "u1" }),
+            ))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!([raw_note_json("n1", "rust note")])),
+                ResponseTemplate::new(200).set_body_json(json!([raw_note_json("n1", "rust note")])),
             )
             .mount(&server)
             .await;

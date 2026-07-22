@@ -52,11 +52,7 @@ pub fn run_accounts(db: &Database, fmt: OutputFormat) -> Result<(), NoteDeckErro
     Ok(())
 }
 
-pub async fn run_login(
-    db: &Database,
-    host: &str,
-    fmt: OutputFormat,
-) -> Result<(), NoteDeckError> {
+pub async fn run_login(db: &Database, host: &str, fmt: OutputFormat) -> Result<(), NoteDeckError> {
     let client = MisskeyClient::new()?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -89,9 +85,8 @@ pub async fn run_login(
     ];
     let permission_str = permissions.join(",");
     let scheme = crate::insecure::http_scheme(host);
-    let auth_url = format!(
-        "{scheme}://{host}/miauth/{session_id}?name=notecli&permission={permission_str}"
-    );
+    let auth_url =
+        format!("{scheme}://{host}/miauth/{session_id}?name=notecli&permission={permission_str}");
 
     match fmt {
         OutputFormat::Json | OutputFormat::Jsonl => {
@@ -108,7 +103,10 @@ pub async fn run_login(
             println!();
             println!("  {}", theme::link(&auth_url));
             println!();
-            println!("{}", theme::muted("認証が完了したらEnterを押してください..."));
+            println!(
+                "{}",
+                theme::muted("認証が完了したらEnterを押してください...")
+            );
         }
     }
 

@@ -405,7 +405,8 @@ impl StreamingManager {
             } else {
                 StreamConnectionState::Reconnecting
             };
-            self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
+            self.emitter
+                .emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                     account_id: account_id.to_string(),
                     state,
                 })));
@@ -433,7 +434,10 @@ impl StreamingManager {
                 None
             }
             Err(_) => {
-                tracing::warn!(account_id, "initial connect timed out; retrying in background");
+                tracing::warn!(
+                    account_id,
+                    "initial connect timed out; retrying in background"
+                );
                 None
             }
         };
@@ -483,7 +487,8 @@ impl StreamingManager {
             },
         );
 
-        self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
+        self.emitter
+            .emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                 account_id: account_id.to_string(),
                 state: if connected {
                     StreamConnectionState::Connected
@@ -526,7 +531,8 @@ impl StreamingManager {
         captured.remove(account_id);
         drop(captured);
 
-        self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
+        self.emitter
+            .emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                 account_id: account_id.to_string(),
                 state: StreamConnectionState::Disconnected,
             })));
@@ -568,7 +574,8 @@ impl StreamingManager {
                 let interval = Duration::from_millis(interval_ms.unwrap_or(15_000));
                 self.start_polling(account_id, host, token, interval).await;
 
-                self.emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
+                self.emitter
+                    .emit(StreamEvent::Status(Box::new(StreamStatusEvent {
                         account_id: account_id.to_string(),
                         state: StreamConnectionState::Connected,
                     })));
@@ -1085,9 +1092,9 @@ async fn connection_task(
     loop {
         connected_flag.store(false, Ordering::Relaxed);
         emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
-                account_id: account_id.clone(),
-                state: StreamConnectionState::Reconnecting,
-            })));
+            account_id: account_id.clone(),
+            state: StreamConnectionState::Reconnecting,
+        })));
 
         // Wait with backoff, but listen for Shutdown during the wait.
         // Equal Jitter (sleep in [backoff/2, backoff]) de-syncs reconnects
@@ -1128,9 +1135,9 @@ async fn connection_task(
                 connected_flag.store(true, Ordering::Relaxed);
 
                 emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
-                        account_id: account_id.clone(),
-                        state: StreamConnectionState::Connected,
-                    })));
+                    account_id: account_id.clone(),
+                    state: StreamConnectionState::Connected,
+                })));
 
                 let reason = run_ws_session(
                     &emitter,
@@ -1418,7 +1425,11 @@ async fn handle_ws_message(
                 note_id,
                 update,
             };
-            emit_both(emitter, event_bus, StreamEvent::NoteCaptureUpdated(Box::new(payload)));
+            emit_both(
+                emitter,
+                event_bus,
+                StreamEvent::NoteCaptureUpdated(Box::new(payload)),
+            );
         }
         return;
     }
@@ -1501,7 +1512,11 @@ async fn handle_ws_message(
             note_id,
             update,
         };
-        emit_both(emitter, event_bus, StreamEvent::NoteUpdated(Box::new(payload)));
+        emit_both(
+            emitter,
+            event_bus,
+            StreamEvent::NoteUpdated(Box::new(payload)),
+        );
     } else if kind == "main" {
         if event_type == "notification" {
             if let Ok(raw) = serde_json::from_value::<RawNotification>(event_body) {
@@ -1511,7 +1526,11 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     notification,
                 };
-                emit_both(emitter, event_bus, StreamEvent::Notification(Box::new(payload)));
+                emit_both(
+                    emitter,
+                    event_bus,
+                    StreamEvent::Notification(Box::new(payload)),
+                );
             }
         } else if event_type == "mention" || event_type == "reply" {
             // main-event として emit しつつ、mention としても parse を試みる
@@ -1538,7 +1557,11 @@ async fn handle_ws_message(
                 event_type,
                 body: event_body,
             };
-            emit_both(emitter, event_bus, StreamEvent::MainEvent(Box::new(payload)));
+            emit_both(
+                emitter,
+                event_bus,
+                StreamEvent::MainEvent(Box::new(payload)),
+            );
         }
     } else if kind == "chat" {
         if event_type == "message" {
@@ -1575,7 +1598,11 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     message: msg,
                 };
-                emit_both(emitter, event_bus, StreamEvent::ChatMessage(Box::new(payload)));
+                emit_both(
+                    emitter,
+                    event_bus,
+                    StreamEvent::ChatMessage(Box::new(payload)),
+                );
             }
         } else if event_type == "deleted" {
             if let Some(id) = event_body.as_str() {
@@ -1596,7 +1623,11 @@ async fn handle_ws_message(
                     subscription_id: sub_id,
                     message_id: id_owned,
                 };
-                emit_both(emitter, event_bus, StreamEvent::ChatMessageDeleted(Box::new(payload)));
+                emit_both(
+                    emitter,
+                    event_bus,
+                    StreamEvent::ChatMessageDeleted(Box::new(payload)),
+                );
             }
         } else if event_type == "react" || event_type == "unreact" {
             let is_react = event_type == "react";
@@ -1626,7 +1657,11 @@ async fn handle_ws_message(
                         reaction: body.reaction,
                         user: body.user,
                     };
-                    emit_both(emitter, event_bus, StreamEvent::ChatMessageReacted(Box::new(payload)));
+                    emit_both(
+                        emitter,
+                        event_bus,
+                        StreamEvent::ChatMessageReacted(Box::new(payload)),
+                    );
                 } else {
                     let payload = StreamChatMessageUnreactedEvent {
                         account_id: account_id.to_string(),
@@ -1635,7 +1670,11 @@ async fn handle_ws_message(
                         reaction: body.reaction,
                         user: body.user,
                     };
-                    emit_both(emitter, event_bus, StreamEvent::ChatMessageUnreacted(Box::new(payload)));
+                    emit_both(
+                        emitter,
+                        event_bus,
+                        StreamEvent::ChatMessageUnreacted(Box::new(payload)),
+                    );
                 }
             }
         }
@@ -1732,7 +1771,11 @@ async fn polling_loop(
                             subscription_id: sub_id.clone(),
                             note,
                         };
-                        emit_both(emitter.as_ref(), &event_bus, StreamEvent::Note(Box::new(payload)));
+                        emit_both(
+                            emitter.as_ref(),
+                            &event_bus,
+                            StreamEvent::Note(Box::new(payload)),
+                        );
                     }
 
                     consecutive_failures = 0;
@@ -1841,9 +1884,9 @@ async fn polling_loop(
             };
 
             emitter.emit(StreamEvent::Status(Box::new(StreamStatusEvent {
-                    account_id: account_id.clone(),
-                    state: StreamConnectionState::Reconnecting,
-                })));
+                account_id: account_id.clone(),
+                state: StreamConnectionState::Reconnecting,
+            })));
 
             Duration::from_secs(backoff)
         } else {
@@ -1927,11 +1970,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(crate::db::Database::open(&dir.path().join("test.db")).unwrap());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let manager = StreamingManager::new(
-            Arc::new(ChannelEmitter(tx)),
-            Arc::new(EventBus::new()),
-            db,
-        );
+        let manager =
+            StreamingManager::new(Arc::new(ChannelEmitter(tx)), Arc::new(EventBus::new()), db);
 
         // 127.0.0.1:1 は即 connection refused になる
         manager

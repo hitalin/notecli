@@ -9,12 +9,12 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use subtle::ConstantTimeEq;
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
@@ -239,7 +239,11 @@ fn core_openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(get_note, delete_note))
         .routes(routes!(get_note_children))
         .routes(routes!(get_note_conversation))
-        .routes(routes!(get_note_reactions, create_reaction, delete_reaction))
+        .routes(routes!(
+            get_note_reactions,
+            create_reaction,
+            delete_reaction
+        ))
         .routes(routes!(get_user))
         .routes(routes!(get_user_notes))
         .routes(routes!(search_notes))
@@ -254,7 +258,10 @@ fn core_openapi_router() -> OpenApiRouter<AppState> {
 /// own spec.
 pub fn build_core_routes(state: AppState) -> OpenApiRouter {
     core_openapi_router()
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -293,8 +300,14 @@ pub fn endpoints_from_spec(openapi: &utoipa::openapi::OpenApi) -> Vec<Value> {
         }
     }
     out.sort_by(|a, b| {
-        let ka = (a["path"].as_str().unwrap_or(""), a["method"].as_str().unwrap_or(""));
-        let kb = (b["path"].as_str().unwrap_or(""), b["method"].as_str().unwrap_or(""));
+        let ka = (
+            a["path"].as_str().unwrap_or(""),
+            a["method"].as_str().unwrap_or(""),
+        );
+        let kb = (
+            b["path"].as_str().unwrap_or(""),
+            b["method"].as_str().unwrap_or(""),
+        );
         ka.cmp(&kb)
     });
     out
@@ -622,7 +635,14 @@ async fn get_note_reactions(
     let limit = opts.limit.unwrap_or(20);
     let reactions = state
         .client
-        .get_note_reactions(&h, &token, &note_id, opts.r#type.as_deref(), limit, opts.until_id.as_deref())
+        .get_note_reactions(
+            &h,
+            &token,
+            &note_id,
+            opts.r#type.as_deref(),
+            limit,
+            opts.until_id.as_deref(),
+        )
         .await?;
     Ok(Json(reactions))
 }
@@ -674,10 +694,7 @@ async fn delete_reaction(
 ) -> Result<StatusCode, ApiError> {
     let account_id = state.account_id_for_host(&host)?;
     let (h, token) = crate::get_credentials(&state.db, &account_id)?;
-    state
-        .client
-        .delete_reaction(&h, &token, &note_id)
-        .await?;
+    state.client.delete_reaction(&h, &token, &note_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -788,22 +805,20 @@ async fn sse_events(
         .r#type
         .map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
 
-    let stream = BroadcastStream::new(rx).filter_map(move |result| {
-        match result {
-            Ok(sse_event) => {
-                if let Some(ref filter) = type_filter {
-                    if !filter.iter().any(|f| sse_event.event_type.starts_with(f)) {
-                        return None;
-                    }
+    let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+        Ok(sse_event) => {
+            if let Some(ref filter) = type_filter {
+                if !filter.iter().any(|f| sse_event.event_type.starts_with(f)) {
+                    return None;
                 }
-                let event = Event::default()
-                    .event(&sse_event.event_type)
-                    .json_data(&sse_event.data)
-                    .ok()?;
-                Some(Ok(event))
             }
-            Err(_) => None,
+            let event = Event::default()
+                .event(&sse_event.event_type)
+                .json_data(&sse_event.data)
+                .ok()?;
+            Some(Ok(event))
         }
+        Err(_) => None,
     });
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -824,11 +839,7 @@ struct TimelineQueryParams {
 
 impl TimelineQueryParams {
     fn into_timeline_options(self) -> crate::models::TimelineOptions {
-        crate::models::TimelineOptions::new(
-            self.limit.unwrap_or(20),
-            self.since_id,
-            self.until_id,
-        )
+        crate::models::TimelineOptions::new(self.limit.unwrap_or(20), self.since_id, self.until_id)
     }
 }
 

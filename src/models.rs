@@ -104,14 +104,24 @@ impl From<Account> for AccountPublic {
     }
 }
 
+/// サーバー検出結果の生キャッシュ (notedeck#782)。
+///
+/// nodeinfo の software 情報と /api/meta の生 JSON をそのまま保存する。
+/// フォーク解決 (software 名 → ServerSoftware) と feature 判定はアプリ側が
+/// 読取時に行う — 判定ロジックの更新が古いキャッシュに埋まらないようにする。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "camelCase")]
-pub struct StoredServer {
+pub struct ServerDetection {
     pub host: String,
-    pub software: String,
-    pub version: String,
-    pub features_json: String,
+    /// nodeinfo `software.name` (例: "misskey")
+    pub software_name: String,
+    /// nodeinfo `software.version`
+    pub software_version: String,
+    /// nodeinfo 2.1 `software.repository` (例: "https://github.com/misskey-dev/misskey")
+    pub software_repository: Option<String>,
+    /// /api/meta (detail: true) の生 JSON。取得失敗時は "{}"
+    pub meta_json: String,
     pub updated_at: i64,
 }
 
@@ -2348,17 +2358,19 @@ mod tests {
     }
 
     #[test]
-    fn stored_server_serde_roundtrip() {
-        let server = StoredServer {
+    fn server_detection_serde_roundtrip() {
+        let det = ServerDetection {
             host: "misskey.io".into(),
-            software: "misskey".into(),
-            version: "2024.1.0".into(),
-            features_json: r#"{"miAuth":true}"#.into(),
+            software_name: "misskey".into(),
+            software_version: "2024.1.0".into(),
+            software_repository: Some("https://github.com/misskey-dev/misskey".into()),
+            meta_json: r#"{"iconUrl":"/icon.png"}"#.into(),
             updated_at: 1700000000,
         };
-        let json = serde_json::to_string(&server).unwrap();
-        let back: StoredServer = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&det).unwrap();
+        assert!(json.contains("softwareName"));
+        let back: ServerDetection = serde_json::from_str(&json).unwrap();
         assert_eq!(back.host, "misskey.io");
-        assert_eq!(back.version, "2024.1.0");
+        assert_eq!(back.software_version, "2024.1.0");
     }
 }
