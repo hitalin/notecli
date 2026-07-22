@@ -9,6 +9,7 @@ pub mod http_server;
 pub(crate) mod insecure;
 pub mod keychain;
 pub mod models;
+pub mod server_info;
 pub mod streaming;
 
 use db::Database;
@@ -38,10 +39,7 @@ pub fn get_credentials(db: &Database, account_id: &str) -> Result<(String, Strin
         // Try lazy migration to keychain; verify before clearing DB
         if keychain::is_persistent()
             && keychain::store_token(account_id, &db_token).is_ok()
-            && keychain::get_token(account_id)
-                .ok()
-                .flatten()
-                .is_some()
+            && keychain::get_token(account_id).ok().flatten().is_some()
         {
             let _ = db.clear_token(account_id);
         }
