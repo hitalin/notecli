@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::error::NoteDeckError;
 use crate::models::{
-    Account, ChatMessage, ChatMessageReaction, ChatReactionUser, NormalizedNote, StoredServer,
+    Account, ChatMessage, ChatMessageReaction, ChatReactionUser, NormalizedNote, ServerDetection,
 };
 
 mod embedded {
@@ -391,37 +391,42 @@ impl Database {
         Ok(count)
     }
 
-    // --- Servers ---
+    // --- Server detections ---
 
-    pub fn load_servers(&self) -> Result<Vec<StoredServer>, NoteDeckError> {
+    pub fn load_server_detections(&self) -> Result<Vec<ServerDetection>, NoteDeckError> {
         let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT host, software, version, features_json, updated_at FROM servers",
+            "SELECT host, software_name, software_version, software_repository, meta_json, updated_at FROM server_detections",
         )?;
         let rows = stmt.query_map([], |row| {
-            Ok(StoredServer {
+            Ok(ServerDetection {
                 host: row.get(0)?,
-                software: row.get(1)?,
-                version: row.get(2)?,
-                features_json: row.get(3)?,
-                updated_at: row.get(4)?,
+                software_name: row.get(1)?,
+                software_version: row.get(2)?,
+                software_repository: row.get(3)?,
+                meta_json: row.get(4)?,
+                updated_at: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn get_server(&self, host: &str) -> Result<Option<StoredServer>, NoteDeckError> {
+    pub fn get_server_detection(
+        &self,
+        host: &str,
+    ) -> Result<Option<ServerDetection>, NoteDeckError> {
         let conn = self.lock_read()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT host, software, version, features_json, updated_at FROM servers WHERE host = ?1",
+            "SELECT host, software_name, software_version, software_repository, meta_json, updated_at FROM server_detections WHERE host = ?1",
         )?;
         let mut rows = stmt.query_map(params![host], |row| {
-            Ok(StoredServer {
+            Ok(ServerDetection {
                 host: row.get(0)?,
-                software: row.get(1)?,
-                version: row.get(2)?,
-                features_json: row.get(3)?,
-                updated_at: row.get(4)?,
+                software_name: row.get(1)?,
+                software_version: row.get(2)?,
+                software_repository: row.get(3)?,
+                meta_json: row.get(4)?,
+                updated_at: row.get(5)?,
             })
         })?;
         match rows.next() {
@@ -900,22 +905,25 @@ impl Database {
         Ok(())
     }
 
-    pub fn upsert_server(&self, server: &StoredServer) -> Result<(), NoteDeckError> {
+    pub fn upsert_server_detection(&self, det: &ServerDetection) -> Result<(), NoteDeckError> {
         let conn = self.lock_write()?;
         conn.execute(
-            "INSERT INTO servers (host, software, version, features_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO server_detections
+                 (host, software_name, software_version, software_repository, meta_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(host) DO UPDATE SET
-                 software = excluded.software,
-                 version = excluded.version,
-                 features_json = excluded.features_json,
+                 software_name = excluded.software_name,
+                 software_version = excluded.software_version,
+                 software_repository = excluded.software_repository,
+                 meta_json = excluded.meta_json,
                  updated_at = excluded.updated_at",
             params![
-                server.host,
-                server.software,
-                server.version,
-                server.features_json,
-                server.updated_at,
+                det.host,
+                det.software_name,
+                det.software_version,
+                det.software_repository,
+                det.meta_json,
+                det.updated_at,
             ],
         )?;
         Ok(())
@@ -1289,7 +1297,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Account, NormalizedNote, NormalizedUser, StoredServer};
+    use crate::models::{Account, NormalizedNote, NormalizedUser, ServerDetection};
     use std::collections::HashMap;
 
     fn temp_db() -> (tempfile::TempDir, Database) {
@@ -1316,7 +1324,9 @@ mod tests {
             .unwrap();
 
         assert!(tables.contains(&"accounts".to_string()));
-        assert!(tables.contains(&"servers".to_string()));
+        assert!(tables.contains(&"server_detections".to_string()));
+        // V5 で旧 servers テーブルは削除済み
+        assert!(!tables.contains(&"servers".to_string()));
         assert!(tables.contains(&"notes_cache".to_string()));
         assert!(tables.contains(&"ogp_cache".to_string()));
         assert!(tables.contains(&"chat_messages_cache".to_string()));
@@ -1465,35 +1475,45 @@ mod tests {
 
     // --- Server CRUD tests ---
 
-    fn sample_server() -> StoredServer {
-        StoredServer {
+    fn sample_detection() -> ServerDetection {
+        ServerDetection {
             host: "misskey.io".to_string(),
-            software: "misskey".to_string(),
-            version: "2025.3.0".to_string(),
-            features_json: "{}".to_string(),
+            software_name: "misskey".to_string(),
+            software_version: "2025.3.0".to_string(),
+            software_repository: Some("https://github.com/misskey-dev/misskey".to_string()),
+            meta_json: "{}".to_string(),
             updated_at: 1700000000,
         }
     }
 
     #[test]
-    fn server_upsert_and_load() {
+    fn server_detection_upsert_and_load() {
         let (_dir, db) = temp_db();
-        db.upsert_server(&sample_server()).unwrap();
+        db.upsert_server_detection(&sample_detection()).unwrap();
 
-        let servers = db.load_servers().unwrap();
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].host, "misskey.io");
+        let dets = db.load_server_detections().unwrap();
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].host, "misskey.io");
     }
 
     #[test]
-    fn server_get_by_host() {
+    fn server_detection_get_by_host_and_update() {
         let (_dir, db) = temp_db();
-        db.upsert_server(&sample_server()).unwrap();
+        db.upsert_server_detection(&sample_detection()).unwrap();
 
-        let s = db.get_server("misskey.io").unwrap().unwrap();
-        assert_eq!(s.version, "2025.3.0");
+        let d = db.get_server_detection("misskey.io").unwrap().unwrap();
+        assert_eq!(d.software_version, "2025.3.0");
 
-        assert!(db.get_server("nonexistent").unwrap().is_none());
+        // upsert は同 host を上書きする
+        let mut newer = sample_detection();
+        newer.software_version = "2025.4.0".to_string();
+        newer.updated_at = 1700001000;
+        db.upsert_server_detection(&newer).unwrap();
+        let d = db.get_server_detection("misskey.io").unwrap().unwrap();
+        assert_eq!(d.software_version, "2025.4.0");
+        assert_eq!(d.updated_at, 1700001000);
+
+        assert!(db.get_server_detection("nonexistent").unwrap().is_none());
     }
 
     // --- Notes cache tests ---
