@@ -35,22 +35,10 @@ pub struct Check {
 
 impl Check {
     fn env(name: &str, status: Status, message: String) -> Self {
-        Self {
-            name: name.into(),
-            status,
-            message,
-            account: None,
-            fix: None,
-        }
+        Self { name: name.into(), status, message, account: None, fix: None }
     }
     fn acc(account: &str, name: &str, status: Status, message: String) -> Self {
-        Self {
-            name: name.into(),
-            status,
-            message,
-            account: Some(account.into()),
-            fix: None,
-        }
+        Self { name: name.into(), status, message, account: Some(account.into()), fix: None }
     }
     fn with_fix(mut self, fix: impl Into<String>) -> Self {
         self.fix = Some(fix.into());
@@ -90,10 +78,7 @@ pub async fn diagnose(
     }
 
     let targets: Vec<&Account> = match account_spec {
-        Some(spec) => accounts
-            .iter()
-            .filter(|a| account_matches(a, spec))
-            .collect(),
+        Some(spec) => accounts.iter().filter(|a| account_matches(a, spec)).collect(),
         None => accounts.iter().collect(),
     };
     if let Some(spec) = account_spec {
@@ -134,11 +119,7 @@ pub async fn run_doctor(
 
 fn check_database(db: &Database, path: &Path) -> Check {
     match db.load_accounts() {
-        Ok(_) => Check::env(
-            "database",
-            Status::Ok,
-            format!("{} (readable)", path.display()),
-        ),
+        Ok(_) => Check::env("database", Status::Ok, format!("{} (readable)", path.display())),
         Err(e) => Check::env(
             "database",
             Status::Fail,
@@ -176,12 +157,7 @@ async fn check_account(client: &MisskeyClient, a: &Account, checks: &mut Vec<Che
 
     // 認証情報: keychain 優先、DB legacy は警告
     let token = if let Some(t) = keychain::get_token(&a.id).ok().flatten() {
-        checks.push(Check::acc(
-            &label,
-            "credentials",
-            Status::Ok,
-            "token in keychain".into(),
-        ));
+        checks.push(Check::acc(&label, "credentials", Status::Ok, "token in keychain".into()));
         Some(t)
     } else if !a.token.is_empty() {
         checks.push(Check::acc(
@@ -298,23 +274,12 @@ fn print_default(report: &Report) {
     }
 
     println!();
-    let fails = report
-        .checks
-        .iter()
-        .filter(|c| c.status == Status::Fail)
-        .count();
-    let warns = report
-        .checks
-        .iter()
-        .filter(|c| c.status == Status::Warn)
-        .count();
+    let fails = report.checks.iter().filter(|c| c.status == Status::Fail).count();
+    let warns = report.checks.iter().filter(|c| c.status == Status::Warn).count();
     if fails > 0 {
         println!("{}", theme::error(&format!("{fails} check(s) failed")));
     } else if warns > 0 {
-        println!(
-            "{}",
-            theme::badge(&format!("all checks passed ({warns} warning(s))"))
-        );
+        println!("{}", theme::badge(&format!("all checks passed ({warns} warning(s))")));
     } else {
         println!("{}", theme::success("all checks passed"));
     }

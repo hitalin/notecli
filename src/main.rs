@@ -58,8 +58,9 @@ async fn run_daemon(port: u16) {
     let db_path = data_dir.join("notecli.db");
     let db = Arc::new(Database::open(&db_path).expect("Failed to open database"));
 
-    let client =
-        Arc::new(notecli::api::MisskeyClient::new().expect("Failed to create HTTP client"));
+    let client = Arc::new(
+        notecli::api::MisskeyClient::new().expect("Failed to create HTTP client"),
+    );
 
     let event_bus = Arc::new(EventBus::new());
 

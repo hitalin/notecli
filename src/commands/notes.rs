@@ -43,11 +43,7 @@ pub async fn run_post(
     Ok(())
 }
 
-pub async fn run_timeline(
-    ctx: &CmdContext,
-    tl_type: &str,
-    limit: i64,
-) -> Result<(), NoteDeckError> {
+pub async fn run_timeline(ctx: &CmdContext, tl_type: &str, limit: i64) -> Result<(), NoteDeckError> {
     let notes = ctx
         .client
         .get_timeline(
@@ -62,7 +58,11 @@ pub async fn run_timeline(
     Ok(())
 }
 
-pub async fn run_search(ctx: &CmdContext, query: &str, limit: i64) -> Result<(), NoteDeckError> {
+pub async fn run_search(
+    ctx: &CmdContext,
+    query: &str,
+    limit: i64,
+) -> Result<(), NoteDeckError> {
     let notes = ctx
         .client
         .search_notes(
@@ -93,7 +93,11 @@ pub async fn run_note(ctx: &CmdContext, id: &str) -> Result<(), NoteDeckError> {
     Ok(())
 }
 
-pub async fn run_replies(ctx: &CmdContext, id: &str, limit: i64) -> Result<(), NoteDeckError> {
+pub async fn run_replies(
+    ctx: &CmdContext,
+    id: &str,
+    limit: i64,
+) -> Result<(), NoteDeckError> {
     let notes = ctx
         .client
         .get_note_children(&ctx.host, &ctx.token, &ctx.account.id, id, limit as u32)
@@ -102,7 +106,11 @@ pub async fn run_replies(ctx: &CmdContext, id: &str, limit: i64) -> Result<(), N
     Ok(())
 }
 
-pub async fn run_thread(ctx: &CmdContext, id: &str, limit: i64) -> Result<(), NoteDeckError> {
+pub async fn run_thread(
+    ctx: &CmdContext,
+    id: &str,
+    limit: i64,
+) -> Result<(), NoteDeckError> {
     let notes = ctx
         .client
         .get_note_conversation(&ctx.host, &ctx.token, &ctx.account.id, id, limit as u32)
@@ -272,14 +280,24 @@ pub async fn run_unfavorite(ctx: &CmdContext, note_id: &str) -> Result<(), NoteD
 pub async fn run_favorites(ctx: &CmdContext, limit: i64) -> Result<(), NoteDeckError> {
     let notes = ctx
         .client
-        .get_favorites(&ctx.host, &ctx.token, &ctx.account.id, limit, None, None)
+        .get_favorites(
+            &ctx.host,
+            &ctx.token,
+            &ctx.account.id,
+            limit,
+            None,
+            None,
+        )
         .await?;
     print_notes(&notes, ctx.fmt);
     Ok(())
 }
 
 pub async fn run_emojis(ctx: &CmdContext) -> Result<(), NoteDeckError> {
-    let emojis = ctx.client.get_server_emojis(&ctx.host, &ctx.token).await?;
+    let emojis = ctx
+        .client
+        .get_server_emojis(&ctx.host, &ctx.token)
+        .await?;
     print_emojis(&emojis, ctx.fmt);
     Ok(())
 }
